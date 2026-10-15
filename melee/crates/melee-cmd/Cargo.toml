@@ -1,0 +1,8 @@
+[package]
+name = "melee-cmd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+melee-types = { path = "../melee-types" }
+gekko-math = { path = "../gekko-math" }

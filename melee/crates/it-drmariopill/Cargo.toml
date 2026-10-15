@@ -1,0 +1,10 @@
+[package]
+name = "it-drmariopill"
+description = "Dr. Mario's Megavitamin item (itdrmariopill.c)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+melee-it = { path = "../melee-it" }
+melee-types = { path = "../melee-types" }
+gekko-math = { path = "../gekko-math" }

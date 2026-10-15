@@ -1,0 +1,15 @@
+[package]
+name = "ft-emblem"
+description = "Roy character data and callbacks (ftEmblem)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ft-mars-family = { path = "../ft-mars-family" }
+melee-types = { path = "../melee-types" }
+melee-ft = { path = "../melee-ft" }
+hsd-archive = { path = "../hsd-archive" }
+gekko-math = { path = "../gekko-math" }
+
+[dev-dependencies]
+melee-test-support = { path = "../melee-test-support" }

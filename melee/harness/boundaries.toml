@@ -1,0 +1,767 @@
+# Retail match-start boundaries that the port's cold construction reproduces
+# exactly: the explorer's starting points (`--boundary <name>`). A recording
+# made with the same stage, players, stocks and seed replays in Dolphin from
+# `savestate` through replay_to_scenario.py. Every non-Sudden-Death entry is
+# checked by melee-lib's `registered_boundaries_cold_600` (initial scene,
+# particles, 600 gated ticks).
+#
+# To add one: `cd harness && uv run python make_boundary.py --stage <Stage>
+# --players <P1> <P2> [--stocks N]`. It drives the menus in headless Dolphin,
+# saves roms/<name>.sav, writes <name>.toml and <name>_cold.toml, records,
+# gates, and appends the entry here when the port matches.
+
+[[boundary]]
+name = "start_fd_fox4"
+cold = "start_fd_fox4_cold"
+savestate = "harness/roms/start_fd_fox4.sav"
+stage = "FinalDestination"
+players = ["Fox", "Marth"]
+stocks = 4
+seed = 2477457595
+
+[[boundary]]
+name = "start_fd_marth4"
+cold = "start_fd_marth4_cold"
+savestate = "harness/roms/start_fd_marth4.sav"
+stage = "FinalDestination"
+players = ["Marth", "Fox"]
+stocks = 4
+seed = 629775590
+
+# Sudden Death from its first frame (gm_SetupSuddenDeath: one stock at 300%,
+# the Bob-omb rain). The explorer's `sudden-death` mode starts here.
+[[boundary]]
+name = "sudden_death_start_fd_marth"
+cold = "sudden_death_start_fd_marth_cold"
+savestate = "harness/roms/sudden_death_start_fd_marth4.sav"
+stage = "FinalDestination"
+players = ["Marth", "Fox"]
+stocks = 1
+sudden_death = true
+seed = 4258399878
+
+[[boundary]]
+name = "start_bf_fox_marth4"
+cold = "start_bf_fox_marth4_cold"
+savestate = "harness/roms/start_bf_fox_marth4.sav"
+stage = "Battlefield"
+players = ["Fox", "Marth"]
+stocks = 4
+seed = 2830168320
+
+[[boundary]]
+name = "start_bf_marth_fox4"
+cold = "start_bf_marth_fox4_cold"
+savestate = "harness/roms/start_bf_marth_fox4.sav"
+stage = "Battlefield"
+players = ["Marth", "Fox"]
+stocks = 4
+seed = 3183162807
+
+[[boundary]]
+name = "start_fd_falco_fox4"
+cold = "start_fd_falco_fox4_cold"
+savestate = "harness/roms/start_fd_falco_fox4.sav"
+stage = "FinalDestination"
+players = ["Falco", "Fox"]
+stocks = 4
+seed = 1566050261
+
+[[boundary]]
+name = "start_fd_fox_falco4"
+cold = "start_fd_fox_falco4_cold"
+savestate = "harness/roms/start_fd_fox_falco4.sav"
+stage = "FinalDestination"
+players = ["Fox", "Falco"]
+stocks = 4
+seed = 1646358439
+
+[[boundary]]
+name = "start_fd_captainfalcon_fox4"
+cold = "start_fd_captainfalcon_fox4_cold"
+savestate = "harness/roms/start_fd_captainfalcon_fox4.sav"
+stage = "FinalDestination"
+players = ["CaptainFalcon", "Fox"]
+stocks = 4
+seed = 1125385215
+
+[[boundary]]
+name = "start_fd_peach_fox4"
+cold = "start_fd_peach_fox4_cold"
+savestate = "harness/roms/start_fd_peach_fox4.sav"
+stage = "FinalDestination"
+players = ["Peach", "Fox"]
+stocks = 4
+seed = 4112043230
+
+[[boundary]]
+name = "start_fd_yoshi_fox4"
+cold = "start_fd_yoshi_fox4_cold"
+savestate = "harness/roms/start_fd_yoshi_fox4.sav"
+stage = "FinalDestination"
+players = ["Yoshi", "Fox"]
+stocks = 4
+seed = 1445546448
+
+[[boundary]]
+name = "start_fd_jigglypuff_fox4"
+cold = "start_fd_jigglypuff_fox4_cold"
+savestate = "harness/roms/start_fd_jigglypuff_fox4.sav"
+stage = "FinalDestination"
+players = ["Jigglypuff", "Fox"]
+stocks = 4
+seed = 3199439676
+
+[[boundary]]
+name = "start_fd_fox_jigglypuff4"
+cold = "start_fd_fox_jigglypuff4_cold"
+savestate = "harness/roms/start_fd_fox_jigglypuff4.sav"
+stage = "FinalDestination"
+players = ["Fox", "Jigglypuff"]
+stocks = 4
+seed = 2935155039
+
+[[boundary]]
+name = "start_fd_jigglypuff_c1_fox4"
+cold = "start_fd_jigglypuff_c1_fox4_cold"
+savestate = "harness/roms/start_fd_jigglypuff_c1_fox4.sav"
+stage = "FinalDestination"
+players = ["Jigglypuff", "Fox"]
+stocks = 4
+seed = 1637922794
+costumes = [1, 0]
+
+[[boundary]]
+name = "start_fd_jigglypuff_c2_fox4"
+cold = "start_fd_jigglypuff_c2_fox4_cold"
+savestate = "harness/roms/start_fd_jigglypuff_c2_fox4.sav"
+stage = "FinalDestination"
+players = ["Jigglypuff", "Fox"]
+stocks = 4
+seed = 1119689209
+costumes = [2, 0]
+
+[[boundary]]
+name = "start_fd_jigglypuff_c3_fox4"
+cold = "start_fd_jigglypuff_c3_fox4_cold"
+savestate = "harness/roms/start_fd_jigglypuff_c3_fox4.sav"
+stage = "FinalDestination"
+players = ["Jigglypuff", "Fox"]
+stocks = 4
+seed = 245785721
+costumes = [3, 0]
+
+[[boundary]]
+name = "start_fd_jigglypuff_c4_fox4"
+cold = "start_fd_jigglypuff_c4_fox4_cold"
+savestate = "harness/roms/start_fd_jigglypuff_c4_fox4.sav"
+stage = "FinalDestination"
+players = ["Jigglypuff", "Fox"]
+stocks = 4
+seed = 1575895321
+costumes = [4, 0]
+
+[[boundary]]
+name = "start_dl_fox_marth4"
+cold = "start_dl_fox_marth4_cold"
+savestate = "harness/roms/start_dl_fox_marth4.sav"
+stage = "DreamLand"
+players = ["Fox", "Marth"]
+stocks = 4
+seed = 1783163052
+
+[[boundary]]
+name = "start_ys_fox_marth4"
+cold = "start_ys_fox_marth4_cold"
+savestate = "harness/roms/start_ys_fox_marth4.sav"
+stage = "YoshisStory"
+players = ["Fox", "Marth"]
+stocks = 4
+seed = 2983548084
+
+[[boundary]]
+name = "start_fod_fox_marth4"
+cold = "start_fod_fox_marth4_cold"
+savestate = "harness/roms/start_fod_fox_marth4.sav"
+stage = "FountainOfDreams"
+players = ["Fox", "Marth"]
+stocks = 4
+seed = 594180171
+
+[[boundary]]
+name = "start_ps_fox_marth4"
+cold = "start_ps_fox_marth4_cold"
+savestate = "harness/roms/start_ps_fox_marth4.sav"
+stage = "PokemonStadium"
+players = ["Fox", "Marth"]
+stocks = 4
+seed = 866544100
+
+[[boundary]]
+name = "start_fd_pikachu_fox4"
+cold = "start_fd_pikachu_fox4_cold"
+savestate = "harness/roms/start_fd_pikachu_fox4.sav"
+stage = "FinalDestination"
+players = ["Pikachu", "Fox"]
+stocks = 4
+seed = 3648816516
+
+[[boundary]]
+name = "start_fd_mario_fox4"
+cold = "start_fd_mario_fox4_cold"
+savestate = "harness/roms/start_fd_mario_fox4.sav"
+stage = "FinalDestination"
+players = ["Mario", "Fox"]
+stocks = 4
+seed = 1048549139
+
+[[boundary]]
+name = "start_bf_marth_falco4"
+cold = "start_bf_marth_falco4_cold"
+savestate = "harness/roms/start_bf_marth_falco4.sav"
+stage = "Battlefield"
+players = ["Marth", "Falco"]
+stocks = 4
+seed = 2704735648
+
+[[boundary]]
+name = "start_fd_marth_peach4"
+cold = "start_fd_marth_peach4_cold"
+savestate = "harness/roms/start_fd_marth_peach4.sav"
+stage = "FinalDestination"
+players = ["Marth", "Peach"]
+stocks = 4
+seed = 3320397644
+
+[[boundary]]
+name = "start_dl_captainfalcon_jigglypuff4"
+cold = "start_dl_captainfalcon_jigglypuff4_cold"
+savestate = "harness/roms/start_dl_captainfalcon_jigglypuff4.sav"
+stage = "DreamLand"
+players = ["CaptainFalcon", "Jigglypuff"]
+stocks = 4
+seed = 1354140354
+
+[[boundary]]
+name = "start_ys_peach_yoshi4"
+cold = "start_ys_peach_yoshi4_cold"
+savestate = "harness/roms/start_ys_peach_yoshi4.sav"
+stage = "YoshisStory"
+players = ["Peach", "Yoshi"]
+stocks = 4
+seed = 2520918699
+
+[[boundary]]
+name = "start_fod_pikachu_mario4"
+cold = "start_fod_pikachu_mario4_cold"
+savestate = "harness/roms/start_fod_pikachu_mario4.sav"
+stage = "FountainOfDreams"
+players = ["Pikachu", "Mario"]
+stocks = 4
+seed = 1354140354
+
+[[boundary]]
+name = "start_ps_marth_jigglypuff4"
+cold = "start_ps_marth_jigglypuff4_cold"
+savestate = "harness/roms/start_ps_marth_jigglypuff4.sav"
+stage = "PokemonStadium"
+players = ["Marth", "Jigglypuff"]
+stocks = 4
+seed = 806421495
+
+[[boundary]]
+name = "start_fd_falco_captainfalcon4"
+cold = "start_fd_falco_captainfalcon4_cold"
+savestate = "harness/roms/start_fd_falco_captainfalcon4.sav"
+stage = "FinalDestination"
+players = ["Falco", "CaptainFalcon"]
+stocks = 4
+seed = 1506894920
+
+[[boundary]]
+name = "start_bf_yoshi_pikachu4"
+cold = "start_bf_yoshi_pikachu4_cold"
+savestate = "harness/roms/start_bf_yoshi_pikachu4.sav"
+stage = "Battlefield"
+players = ["Yoshi", "Pikachu"]
+stocks = 4
+seed = 806421495
+
+[[boundary]]
+name = "start_dl_mario_falco4"
+cold = "start_dl_mario_falco4_cold"
+savestate = "harness/roms/start_dl_mario_falco4.sav"
+stage = "DreamLand"
+players = ["Mario", "Falco"]
+stocks = 4
+seed = 15085278
+
+[[boundary]]
+name = "start_fd_peach_falco4"
+cold = "start_fd_peach_falco4_cold"
+savestate = "harness/roms/start_fd_peach_falco4.sav"
+stage = "FinalDestination"
+players = ["Peach", "Falco"]
+stocks = 4
+seed = 4114656791
+
+[[boundary]]
+name = "start_bf_falco_marth4"
+cold = "start_bf_falco_marth4_cold"
+savestate = "harness/roms/start_bf_falco_marth4.sav"
+stage = "Battlefield"
+players = ["Falco", "Marth"]
+stocks = 4
+seed = 3258945434
+
+[[boundary]]
+name = "start_fd_roy_fox4"
+cold = "start_fd_roy_fox4_cold"
+savestate = "harness/roms/start_fd_roy_fox4.sav"
+stage = "FinalDestination"
+players = ["Roy", "Fox"]
+stocks = 4
+seed = 3227408113
+
+[[boundary]]
+name = "start_fd_drmario_fox4"
+cold = "start_fd_drmario_fox4_cold"
+savestate = "harness/roms/start_fd_drmario_fox4.sav"
+stage = "FinalDestination"
+players = ["DrMario", "Fox"]
+stocks = 4
+seed = 486281387
+
+[[boundary]]
+name = "start_fd_luigi_fox4"
+cold = "start_fd_luigi_fox4_cold"
+savestate = "harness/roms/start_fd_luigi_fox4.sav"
+stage = "FinalDestination"
+players = ["Luigi", "Fox"]
+stocks = 4
+seed = 1220824445
+
+[[boundary]]
+name = "start_fd_pichu_fox4"
+cold = "start_fd_pichu_fox4_cold"
+savestate = "harness/roms/start_fd_pichu_fox4.sav"
+stage = "FinalDestination"
+players = ["Pichu", "Fox"]
+stocks = 4
+seed = 3558153937
+
+[[boundary]]
+name = "start_fd_ganondorf_fox4"
+cold = "start_fd_ganondorf_fox4_cold"
+savestate = "harness/roms/start_fd_ganondorf_fox4.sav"
+stage = "FinalDestination"
+players = ["Ganondorf", "Fox"]
+stocks = 4
+seed = 2009794032
+
+[[boundary]]
+name = "start_fd_iceclimbers_fox4"
+cold = "start_fd_iceclimbers_fox4_cold"
+savestate = "harness/roms/start_fd_iceclimbers_fox4.sav"
+stage = "FinalDestination"
+players = ["IceClimbers", "Fox"]
+stocks = 4
+seed = 605098153
+
+[[boundary]]
+name = "start_fd_samus_fox4"
+cold = "start_fd_samus_fox4_cold"
+savestate = "harness/roms/start_fd_samus_fox4.sav"
+stage = "FinalDestination"
+players = ["Samus", "Fox"]
+stocks = 4
+seed = 915204971
+
+[[boundary]]
+name = "start_fd_sheik_fox4"
+cold = "start_fd_sheik_fox4_cold"
+savestate = "harness/roms/start_fd_sheik_fox4.sav"
+stage = "FinalDestination"
+players = ["Sheik", "Fox"]
+stocks = 4
+seed = 4228767398
+
+[[boundary]]
+name = "start_fd_zelda_fox4"
+cold = "start_fd_zelda_fox4_cold"
+savestate = "harness/roms/start_fd_zelda_fox4.sav"
+stage = "FinalDestination"
+players = ["Zelda", "Fox"]
+stocks = 4
+seed = 3958977570
+
+[[boundary]]
+name = "start_fd_link_fox4"
+cold = "start_fd_link_fox4_cold"
+savestate = "harness/roms/start_fd_link_fox4.sav"
+stage = "FinalDestination"
+players = ["Link", "Fox"]
+stocks = 4
+seed = 1420932829
+
+[[boundary]]
+name = "start_fd_younglink_fox4"
+cold = "start_fd_younglink_fox4_cold"
+savestate = "harness/roms/start_fd_younglink_fox4.sav"
+stage = "FinalDestination"
+players = ["YoungLink", "Fox"]
+stocks = 4
+seed = 3155090647
+
+[[boundary]]
+name = "start_fd_marth_marth4"
+cold = "start_fd_marth_marth4_cold"
+savestate = "harness/roms/start_fd_marth_marth4.sav"
+stage = "FinalDestination"
+players = ["Marth", "Marth"]
+stocks = 4
+seed = 4000242866
+costumes = [0, 1]
+
+[[boundary]]
+name = "start_bf_fox_falco4"
+cold = "start_bf_fox_falco4_cold"
+savestate = "harness/roms/start_bf_fox_falco4.sav"
+stage = "Battlefield"
+players = ["Fox", "Falco"]
+stocks = 4
+seed = 2597788932
+
+[[boundary]]
+name = "start_fd_peach_peach4"
+cold = "start_fd_peach_peach4_cold"
+savestate = "harness/roms/start_fd_peach_peach4.sav"
+stage = "FinalDestination"
+players = ["Peach", "Peach"]
+stocks = 4
+seed = 1117749374
+costumes = [0, 1]
+
+[[boundary]]
+name = "start_bf_iceclimbers_fox4"
+cold = "start_bf_iceclimbers_fox4_cold"
+savestate = "harness/roms/start_bf_iceclimbers_fox4.sav"
+stage = "Battlefield"
+players = ["IceClimbers", "Fox"]
+stocks = 4
+seed = 2498056134
+
+[[boundary]]
+name = "start_ys_iceclimbers_fox4"
+cold = "start_ys_iceclimbers_fox4_cold"
+savestate = "harness/roms/start_ys_iceclimbers_fox4.sav"
+stage = "YoshisStory"
+players = ["IceClimbers", "Fox"]
+stocks = 4
+seed = 1436360687
+
+[[boundary]]
+name = "start_fd_donkeykong_fox4"
+cold = "start_fd_donkeykong_fox4_cold"
+savestate = "harness/roms/start_fd_donkeykong_fox4.sav"
+stage = "FinalDestination"
+players = ["DonkeyKong", "Fox"]
+stocks = 4
+seed = 2974935244
+
+[[boundary]]
+name = "start_fd_bowser_fox4"
+cold = "start_fd_bowser_fox4_cold"
+savestate = "harness/roms/start_fd_bowser_fox4.sav"
+stage = "FinalDestination"
+players = ["Bowser", "Fox"]
+stocks = 4
+seed = 2125490688
+
+[[boundary]]
+name = "start_fd_gameandwatch_fox4"
+cold = "start_fd_gameandwatch_fox4_cold"
+savestate = "harness/roms/start_fd_gameandwatch_fox4.sav"
+stage = "FinalDestination"
+players = ["GameAndWatch", "Fox"]
+stocks = 4
+seed = 2517060990
+
+[[boundary]]
+name = "start_fd_gameandwatch_samus4"
+cold = "start_fd_gameandwatch_samus4_cold"
+savestate = "harness/roms/start_fd_gameandwatch_samus4.sav"
+stage = "FinalDestination"
+players = ["GameAndWatch", "Samus"]
+stocks = 4
+seed = 1952299450
+
+[[boundary]]
+name = "start_ps_peach_fox4"
+cold = "start_ps_peach_fox4_cold"
+savestate = "harness/roms/start_ps_peach_fox4.sav"
+stage = "PokemonStadium"
+players = ["Peach", "Fox"]
+stocks = 4
+seed = 4075074114
+
+[[boundary]]
+name = "start_fd_ness_fox4"
+cold = "start_fd_ness_fox4_cold"
+savestate = "harness/roms/start_fd_ness_fox4.sav"
+stage = "FinalDestination"
+players = ["Ness", "Fox"]
+stocks = 4
+seed = 2152001354
+
+[[boundary]]
+name = "start_fd_mewtwo_fox4"
+cold = "start_fd_mewtwo_fox4_cold"
+savestate = "harness/roms/start_fd_mewtwo_fox4.sav"
+stage = "FinalDestination"
+players = ["Mewtwo", "Fox"]
+stocks = 4
+seed = 2728150190
+
+[[boundary]]
+name = "start_ps_iceclimbers_peach4"
+cold = "start_ps_iceclimbers_peach4_cold"
+savestate = "harness/roms/start_ps_iceclimbers_peach4.sav"
+stage = "PokemonStadium"
+players = ["IceClimbers", "Peach"]
+stocks = 4
+seed = 3306616091
+
+[[boundary]]
+name = "start_dl_link_marth4"
+cold = "start_dl_link_marth4_cold"
+savestate = "harness/roms/start_dl_link_marth4.sav"
+stage = "DreamLand"
+players = ["Link", "Marth"]
+stocks = 4
+seed = 1942826078
+
+[[boundary]]
+name = "start_fd_kirby_fox4"
+cold = "start_fd_kirby_fox4_cold"
+savestate = "harness/roms/start_fd_kirby_fox4.sav"
+stage = "FinalDestination"
+players = ["Kirby", "Fox"]
+stocks = 4
+seed = 4288124430
+
+[[boundary]]
+name = "start_ps_samus_fox4"
+cold = "start_ps_samus_fox4_cold"
+savestate = "harness/roms/start_ps_samus_fox4.sav"
+stage = "PokemonStadium"
+players = ["Samus", "Fox"]
+stocks = 4
+seed = 731079263
+
+[[boundary]]
+name = "start_ps_link_fox4"
+cold = "start_ps_link_fox4_cold"
+savestate = "harness/roms/start_ps_link_fox4.sav"
+stage = "PokemonStadium"
+players = ["Link", "Fox"]
+stocks = 4
+seed = 2224148256
+
+[[boundary]]
+name = "start_fd_mario_peach4"
+cold = "start_fd_mario_peach4_cold"
+savestate = "harness/roms/start_fd_mario_peach4.sav"
+stage = "FinalDestination"
+players = ["Mario", "Peach"]
+stocks = 4
+seed = 134876611
+
+[[boundary]]
+name = "start_fd_iceclimbers_peach4"
+cold = "start_fd_iceclimbers_peach4_cold"
+savestate = "harness/roms/start_fd_iceclimbers_peach4.sav"
+stage = "FinalDestination"
+players = ["IceClimbers", "Peach"]
+stocks = 4
+seed = 176491922
+
+[[boundary]]
+name = "start_bf_bowser_marth4"
+cold = "start_bf_bowser_marth4_cold"
+savestate = "harness/roms/start_bf_bowser_marth4.sav"
+stage = "Battlefield"
+players = ["Bowser", "Marth"]
+stocks = 4
+seed = 396423658
+
+[[boundary]]
+name = "start_dl_donkeykong_peach4"
+cold = "start_dl_donkeykong_peach4_cold"
+savestate = "harness/roms/start_dl_donkeykong_peach4.sav"
+stage = "DreamLand"
+players = ["DonkeyKong", "Peach"]
+stocks = 4
+seed = 1088776646
+
+[[boundary]]
+name = "start_ys_drmario_samus4"
+cold = "start_ys_drmario_samus4_cold"
+savestate = "harness/roms/start_ys_drmario_samus4.sav"
+stage = "YoshisStory"
+players = ["DrMario", "Samus"]
+stocks = 4
+seed = 3780528771
+
+[[boundary]]
+name = "start_fod_ganondorf_link4"
+cold = "start_fod_ganondorf_link4_cold"
+savestate = "harness/roms/start_fod_ganondorf_link4.sav"
+stage = "FountainOfDreams"
+players = ["Ganondorf", "Link"]
+stocks = 4
+seed = 2619413890
+
+[[boundary]]
+name = "start_dl_luigi_iceclimbers4"
+cold = "start_dl_luigi_iceclimbers4_cold"
+savestate = "harness/roms/start_dl_luigi_iceclimbers4.sav"
+stage = "DreamLand"
+players = ["Luigi", "IceClimbers"]
+stocks = 4
+seed = 1519822064
+
+[[boundary]]
+name = "start_bf_mewtwo_peach4"
+cold = "start_bf_mewtwo_peach4_cold"
+savestate = "harness/roms/start_bf_mewtwo_peach4.sav"
+stage = "Battlefield"
+players = ["Mewtwo", "Peach"]
+stocks = 4
+seed = 3763671827
+
+[[boundary]]
+name = "start_ys_ness_marth4"
+cold = "start_ys_ness_marth4_cold"
+savestate = "harness/roms/start_ys_ness_marth4.sav"
+stage = "YoshisStory"
+players = ["Ness", "Marth"]
+stocks = 4
+seed = 1434975614
+
+[[boundary]]
+name = "start_fod_pichu_samus4"
+cold = "start_fod_pichu_samus4_cold"
+savestate = "harness/roms/start_fod_pichu_samus4.sav"
+stage = "FountainOfDreams"
+players = ["Pichu", "Samus"]
+stocks = 4
+seed = 45688817
+
+[[boundary]]
+name = "start_dl_roy_link4"
+cold = "start_dl_roy_link4_cold"
+savestate = "harness/roms/start_dl_roy_link4.sav"
+stage = "DreamLand"
+players = ["Roy", "Link"]
+stocks = 4
+seed = 2973719761
+
+[[boundary]]
+name = "start_bf_sheik_iceclimbers4"
+cold = "start_bf_sheik_iceclimbers4_cold"
+savestate = "harness/roms/start_bf_sheik_iceclimbers4.sav"
+stage = "Battlefield"
+players = ["Sheik", "IceClimbers"]
+stocks = 4
+seed = 2245583548
+
+[[boundary]]
+name = "start_ys_younglink_peach4"
+cold = "start_ys_younglink_peach4_cold"
+savestate = "harness/roms/start_ys_younglink_peach4.sav"
+stage = "YoshisStory"
+players = ["YoungLink", "Peach"]
+stocks = 4
+seed = 2606367415
+
+[[boundary]]
+name = "start_fod_zelda_marth4"
+cold = "start_fod_zelda_marth4_cold"
+savestate = "harness/roms/start_fod_zelda_marth4.sav"
+stage = "FountainOfDreams"
+players = ["Zelda", "Marth"]
+stocks = 4
+seed = 3327954167
+
+[[boundary]]
+name = "start_bf_gameandwatch_link4"
+cold = "start_bf_gameandwatch_link4_cold"
+savestate = "harness/roms/start_bf_gameandwatch_link4.sav"
+stage = "Battlefield"
+players = ["GameAndWatch", "Link"]
+stocks = 4
+seed = 681742994
+
+[[boundary]]
+name = "start_ys_samus_falco4"
+cold = "start_ys_samus_falco4_cold"
+savestate = "harness/roms/start_ys_samus_falco4.sav"
+stage = "YoshisStory"
+players = ["Samus", "Falco"]
+stocks = 4
+seed = 1009000238
+
+[[boundary]]
+name = "start_dl_yoshi_sheik4"
+cold = "start_dl_yoshi_sheik4_cold"
+savestate = "harness/roms/start_dl_yoshi_sheik4.sav"
+stage = "DreamLand"
+players = ["Yoshi", "Sheik"]
+stocks = 4
+seed = 1620380779
+
+[[boundary]]
+name = "start_fod_captainfalcon_zelda4"
+cold = "start_fod_captainfalcon_zelda4_cold"
+savestate = "harness/roms/start_fod_captainfalcon_zelda4.sav"
+stage = "FountainOfDreams"
+players = ["CaptainFalcon", "Zelda"]
+stocks = 4
+seed = 3429719979
+
+[[boundary]]
+name = "start_bf_pikachu_ganondorf4"
+cold = "start_bf_pikachu_ganondorf4_cold"
+savestate = "harness/roms/start_bf_pikachu_ganondorf4.sav"
+stage = "Battlefield"
+players = ["Pikachu", "Ganondorf"]
+stocks = 4
+seed = 3458432933
+
+[[boundary]]
+name = "start_dl_link_roy4"
+cold = "start_dl_link_roy4_cold"
+savestate = "harness/roms/start_dl_link_roy4.sav"
+stage = "DreamLand"
+players = ["Link", "Roy"]
+stocks = 4
+seed = 2516155741
+
+[[boundary]]
+name = "start_ys_kirby_fox4"
+cold = "start_ys_kirby_fox4_cold"
+savestate = "harness/roms/start_ys_kirby_fox4.sav"
+stage = "YoshisStory"
+players = ["Kirby", "Fox"]
+stocks = 4
+seed = 847245822
+
+[[boundary]]
+name = "start_fd_kirby_captainfalcon4"
+cold = "start_fd_kirby_captainfalcon4_cold"
+savestate = "harness/roms/start_fd_kirby_captainfalcon4.sav"
+stage = "FinalDestination"
+players = ["Kirby", "CaptainFalcon"]
+stocks = 4
+seed = 4055080798

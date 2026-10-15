@@ -1,0 +1,120 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/melee-test-support", # Dev-only oracle preflight; no gameplay dependencies.
+    "crates/melee-trace-io", # Plain or zstd oracle trace reading; tooling and tests only.
+    # Layer 0: leaf crates. Tiny, stable, everything depends on them.
+    "crates/gekko-math",
+    "crates/hsd-types",
+    "crates/melee-types",
+    "crates/gc-disc", # Disc image header and FST, sans IO.
+    # Layer 1: HSD engine.
+    "crates/hsd-archive",
+    "crates/hsd-gobj",
+    "crates/hsd-anim",
+    "crates/hsd-particle",
+    # Layer 2: Melee subsystems. None of these depend on each other except as listed in their Cargo.toml.
+    "crates/melee-lb",
+    "crates/melee-mp",
+    "crates/melee-gr",
+    "crates/melee-it",
+    "crates/it-foxlaser",
+    "crates/it-foxillusion",
+    "crates/it-bombhei",
+    "crates/it-sword",
+    "crates/it-dosei",
+    "crates/it-yoshieggthrow",
+    "crates/it-yoshistar",
+    "crates/it-mariofire",
+    "crates/it-luigifire",
+    "crates/it-mariocape",
+    "crates/it-drmariopill",
+    "crates/it-peach",
+    "crates/it-pikachu",
+    "crates/it-heiho",
+    "crates/it-seak",
+    "crates/it-zelda",
+    "crates/it-link",
+    "crates/melee-ft",
+    "crates/melee-cmd",
+    "crates/melee-coll",
+    "crates/melee-ef",
+    "crates/melee-if",
+    "crates/melee-cpu",
+    "crates/melee-cm",
+    # Layer 3: one crate per character. Depend on melee-ft, never on each other.
+    "crates/ft-fox",
+    "crates/ft-fox-family",
+    "crates/ft-mars-family",
+    "crates/ft-mars",
+    "crates/ft-emblem",
+    "crates/ft-falco",
+    "crates/ft-captain-family",
+    "crates/ft-captain",
+    "crates/ft-ganon",
+    "crates/ft-peach",
+    "crates/ft-yoshi",
+    "crates/ft-purin",
+    "crates/ft-pikachu-family",
+    "crates/ft-pikachu",
+    "crates/ft-mario-family",
+    "crates/ft-pichu",
+    "crates/ft-mario",
+    "crates/ft-drmario",
+    "crates/ft-luigi",
+    "crates/ft-iceclimbers",
+    "crates/it-climbersice",
+    "crates/ft-samus",
+    "crates/it-samus",
+    "crates/ft-gamewatch",
+    "crates/it-gamewatch",
+    "crates/ft-seak",
+    "crates/ft-zelda",
+    "crates/ft-link-family",
+    "crates/ft-link",
+    "crates/ft-younglink",
+    "crates/ft-donkey",
+    "crates/ft-koopa",
+    "crates/it-koopaflame",
+    "crates/it-ness",
+    "crates/ft-ness",
+    "crates/ft-kirby",
+    "crates/it-kirby",
+    "crates/ft-mewtwo",
+    "crates/it-mewtwo",
+    # Layer 4: binaries and tooling.
+    "crates/melee-lib",
+    "crates/melee-sim",
+    "crates/melee-platform",
+    "crates/melee-web", # wasm32 only: the browser host's binding to melee-platform.
+    "crates/melee-replay",
+    "crates/melee-diff",
+    "crates/slp",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+repository = "https://github.com/nikhilunni/melee"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+# Bit-exactness is non-negotiable. Never enable fast-math style flags here,
+# and keep debug and release float behaviour identical.
+[profile.release]
+debug = 1
+# codegen-units = 1 would cut the stripped binary by ~13% but doubles clean
+# release builds; left at the default (user, 2026-09-28; docs/PERF.md).
+
+# Dev builds: optimise dependencies once, keep our own crates fast to compile.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true

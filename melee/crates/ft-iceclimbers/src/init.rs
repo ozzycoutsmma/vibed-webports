@@ -1,0 +1,365 @@
+//! Popo and Nana load/reset hooks: ftpopo.c and ftnana.c.
+use crate::attributes::{self, IceClimberAttributes};
+use melee_ft::fighter::{
+    assets::{CharacterDescriptor, CostumeDescriptor, FighterAssets},
+    Capabilities, CharacterCallbacks, CharacterForm, CharacterState, Fighter, MotionRow,
+};
+use melee_types::FighterKind;
+
+/// ftPopo_FighterVars (+222C..+2253), which both climbers carry. OnDeath
+/// clears every field (ftPp_Init_OnDeath, ftNn_Init_OnDeath).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClimberVars {
+    /// +222C: the ice block the Ice Shot holds until it launches it.
+    pub ice: bool,
+    /// death2_cb and take_dmg_cb are ftPp_Init_8011F060 (installed with the
+    /// ice block, the Blizzard's breath or the Squall Hammer; Nana's rows
+    /// install ftNn_Init_80122FAC, its tail), removed by a motion change or
+    /// their release.
+    pub ice_callbacks: bool,
+    /// accessory4_cb.
+    pub accessory: crate::climber::Accessory,
+    /// ftParts_80074A4C(gobj, 0 | 1, 0): model groups 0 and 1.
+    pub model_groups: [i32; 2],
+    /// +2234: x2234.
+    // TODO(meaning): written by the specials.
+    pub x2234: u32,
+    /// +2230 bit 0: the Blizzard's breath is out (fn_80122D2C); its
+    /// effects go with it (ftPp_SpecialHi_80122898).
+    pub breath: bool,
+    /// +224C: an aerial Ice Shot lifted the climber since it last landed
+    /// (cleared by ftCo_Landing_Enter too, ftCo_Landing.c:71).
+    pub air_ice_shot_used: bool,
+    /// +2250: how far below the usual height a repeated aerial Ice Shot
+    /// makes its block.
+    pub ice_drop: f32,
+    /// The Belay's scratch (mv.pp, +2238..+2248).
+    pub belay: crate::special_hi::BelayVars,
+    /// fp->mv.pp.speciallw (+2340, +2344): the Blizzard's puff timer.
+    pub blizzard: crate::special_lw::Blizzard,
+}
+impl ClimberVars {
+    /// ftPp_Init_OnDeath / ftNn_Init_OnDeath: the shared reset.
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+    /// ftPopo_FighterVars from a retail Fighter dump. A saved item GObj
+    /// (+222C, +2238) has no port owner yet.
+    fn restore(&mut self, raw: &[u8]) {
+        let word = |offset: usize| u32::from_be_bytes(raw[offset..offset + 4].try_into().unwrap());
+        if word(0x222C) != 0 || word(0x2238) != 0 {
+            unimplemented!("ftPopo_FighterVars: a saved item GObj (+222C/+2238)");
+        }
+        self.breath = raw[0x2230] & 0x80 != 0;
+        self.x2234 = word(0x2234);
+        self.air_ice_shot_used = word(0x224C) != 0;
+        self.ice_drop = f32::from_bits(word(0x2250));
+        self.belay.anchor = hsd_types::Vec3::new(
+            f32::from_bits(word(0x2240)),
+            f32::from_bits(word(0x2244)),
+            f32::from_bits(word(0x2248)),
+        );
+    }
+}
+
+/// Which climber a fighter is. Retail runs both on one code path
+/// (ftNn_Init_MotionStateTable repeats Popo's); only load, reset and a few
+/// voice clips look at the kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Climber {
+    /// FTKIND_POPO, the climber the player controls.
+    Popo,
+    /// FTKIND_NANA, the partner fighter (x221F_b4) whose inputs melee-cpu
+    /// supplies.
+    Nana,
+}
+
+/// Either climber's payload: one type, so the shared hooks and specials
+/// compile once; `POPO_TABLE` and `NANA_TABLE` differ only in descriptor.
+#[derive(Clone, Debug)]
+pub struct IceClimber {
+    pub climber: Climber,
+    pub attributes: IceClimberAttributes,
+    pub vars: ClimberVars,
+    /// Popo's fp->mv.pp.specials in the Squall Hammer.
+    pub squall: crate::special_s::SquallHammer,
+    /// Nana's fp->mv.pp.unk_80123954.x0: frames she has trailed Popo in
+    /// her Squall Hammer rows.
+    pub trail: i32,
+    /// The other climber as the scene offered it before this proc.
+    pub partner: Option<crate::partner::PartnerView>,
+    /// What this proc's callbacks left for the other climber.
+    pub work: crate::partner::PartnerWork,
+    /// The other climber's CollData, when this proc copies it
+    /// (ft_800849EC in Nana's Belay launch).
+    pub partner_collision: Option<melee_types::mp::CollData>,
+    /// The Belay's rope links (Popo's; Nana never makes one). Boxed: the
+    /// links outgrow the inline payload, and a reset keeps them (the next
+    /// rope lays them out again).
+    pub rope: Box<crate::special_hi::rope::Rope>,
+}
+
+/// Nana's form: her own archive and descriptor, Popo's payload type.
+pub struct Nana;
+
+impl CharacterForm for Nana {
+    type Character = IceClimber;
+    fn form_descriptor() -> &'static CharacterDescriptor {
+        &NANA_DESCRIPTOR
+    }
+    fn read_form(
+        data: &hsd_archive::Archive,
+    ) -> Result<IceClimber, melee_ft::desc::FighterDescError> {
+        IceClimber::read(data, Climber::Nana)
+    }
+}
+
+impl IceClimber {
+    fn read(
+        data: &hsd_archive::Archive,
+        climber: Climber,
+    ) -> Result<Self, melee_ft::desc::FighterDescError> {
+        let descriptor = match climber {
+            Climber::Popo => &POPO_DESCRIPTOR,
+            Climber::Nana => &NANA_DESCRIPTOR,
+        };
+        let mut climber_payload =
+            Self::new(climber, attributes::read(data, descriptor.data_symbol)?);
+        if climber == Climber::Popo {
+            climber_payload.rope.attributes = attributes::read_rope(data, descriptor.data_symbol)?;
+        }
+        Ok(climber_payload)
+    }
+
+    /// A climber as loaded: no move under way, no partner observed yet.
+    pub fn new(climber: Climber, attributes: IceClimberAttributes) -> Self {
+        Self {
+            climber,
+            attributes,
+            vars: ClimberVars::default(),
+            squall: Default::default(),
+            trail: 0,
+            partner: None,
+            work: Default::default(),
+            partner_collision: None,
+            rope: Default::default(),
+        }
+    }
+}
+
+pub static POPO_TABLE: melee_ft::fighter::CharacterTable =
+    melee_ft::fighter::CharacterTable::new::<IceClimber>();
+pub static NANA_TABLE: melee_ft::fighter::CharacterTable =
+    melee_ft::fighter::CharacterTable::new::<IceClimber>().with_descriptor(nana_descriptor);
+
+fn nana_descriptor() -> &'static CharacterDescriptor {
+    &NANA_DESCRIPTOR
+}
+
+impl CharacterCallbacks for IceClimber {
+    fn table() -> &'static melee_ft::fighter::CharacterTable {
+        &POPO_TABLE
+    }
+    /// Nana runs Popo's hooks under her own descriptor. Kept out of line so
+    /// scene composition calls this crate's one copy.
+    #[inline(never)]
+    fn into_state(self) -> CharacterState {
+        let nana = self.climber == Climber::Nana;
+        let mut state = CharacterState::new(self);
+        if nana {
+            state.use_table(&NANA_TABLE);
+        }
+        state
+    }
+    fn kind(&self) -> FighterKind {
+        match self.climber {
+            Climber::Popo => FighterKind::Popo,
+            Climber::Nana => FighterKind::Nana,
+        }
+    }
+    /// Popo's: the player's own climber. Nana's form is `Nana`.
+    fn descriptor() -> &'static CharacterDescriptor {
+        &POPO_DESCRIPTOR
+    }
+    fn from_archive(data: &hsd_archive::Archive) -> Result<Self, melee_ft::desc::FighterDescError> {
+        Self::read(data, Climber::Popo)
+    }
+    /// ftCo_800DEA28 default arm (`ftCo_800DEBD0`): the common AppealS entry.
+    const ENTER_TAUNT: fn(&mut Fighter, &FighterAssets) -> melee_ft::fighter::assets::Result<()> =
+        Fighter::enter_common_taunt;
+    const SPECIAL_ROWS: &'static [MotionRow] = &crate::SPECIAL_ROWS;
+    /// No special reads fp->item_gobj: in the ftPopo and ftNana units only
+    /// the four item hooks of ftpopo.c load +1974 (0x8011ED5C, 0x8011ED6C,
+    /// 0x8011EE30, 0x8011EE78), so a held light item stays in hand.
+    const SPECIALS_KEEP_HELD_ITEM: bool = true;
+    const SPECIAL_MOVES: &'static [Option<melee_types::combat::StaleMove>] = &crate::SPECIAL_MOVES;
+    const SPECIAL_PARTNER_SYNC: &'static [bool] = &crate::SPECIAL_PARTNER_SYNC;
+    /// ftPp_Init_OnKnockbackEnter: Fighter_OnKnockbackEnter(gobj, 1).
+    const KNOCKBACK_ENTER: fn(&mut Fighter, &FighterAssets) =
+        |fighter, _assets| fighter.set_knockback_texture_frames(3.0);
+    /// ftPp_Init_OnKnockbackExit: Fighter_OnKnockbackExit(gobj, 1).
+    const KNOCKBACK_EXIT: fn(&mut Fighter, &FighterAssets) =
+        |fighter, _assets| fighter.set_knockback_texture_frames(0.0);
+    fn restore_saved(&mut self, raw: &[u8]) {
+        self.vars.restore(raw);
+    }
+    /// ftCo_Landing_Enter, ftCo_Landing.c:69-71: FTKIND_POPO/NANA.
+    fn on_landing(&mut self, _allow_interrupt: bool) {
+        self.vars.air_ice_shot_used = false;
+    }
+    /// Fighter_ChangeMotionState, fighter.c:1376-1389: death2_cb and
+    /// take_dmg_cb go.
+    fn on_motion_change(&mut self) {
+        self.vars.ice_callbacks = false;
+        self.vars.belay.rope_take_damage = false;
+    }
+    const MOTION_FLAGS: &'static [u32] = &crate::SPECIAL_MOTION_FLAGS;
+    const OBSERVE_PARTNER: Option<melee_ft::fighter::PartnerObserver> =
+        Some(crate::partner::observe);
+    const ACT_ON_PARTNER: Option<melee_ft::fighter::PartnerAction> = Some(crate::partner::act);
+    /// ftCommon_8007DB58: take_dmg_cb, ftPp_Init_8011F060.
+    const TAKE_DAMAGE: Option<fn(&mut Fighter)> = Some(crate::special::take_damage);
+    /// ftCo_800D331C: death2_cb and death3_cb, ftPp_Init_8011F060.
+    const DEATH: Option<fn(&mut Fighter)> = Some(crate::special::death);
+    /// The rope's links are Popo's: its on_accessory is his work.
+    const ARTICLE_ACCESSORY: fn(
+        &mut Fighter,
+        &FighterAssets,
+        &mut melee_mp::CollMap,
+    ) -> Option<u16> = crate::special_hi::rope_accessory;
+    /// it_2725_Logic70_EvtUnk's cleanup (itClimbersstring_UnkMotion3_Anim):
+    /// the rope went without Popo's own removal (he left the Belay).
+    const ARTICLE_DESTROYED: fn(&mut Fighter, melee_types::ItemKind) = |f, kind| {
+        if kind == melee_types::ItemKind::IceClimberGumStrings {
+            crate::special_hi::rope_gone(f);
+        }
+    };
+    /// x2222_b2: Popo's start once Nana joined (Unk19 keeps it across its
+    /// ground/air changes), and Nana hanging (ftNn_Init_801232A4).
+    const CAPE_TURN_BLOCKED: fn(&mut Fighter) -> bool = |f| {
+        let action = f.motion_state.action;
+        (crate::climber::vars(f).belay.partner_joined
+            && (action == crate::special_hi::START || action == crate::special_hi::AIR_START))
+            || action == crate::special_hi::partner::HANG
+    };
+    /// Fighter_8006C80C: the special's accessory4, installed until the next
+    /// motion change.
+    fn accessory(f: &mut Fighter, assets: &FighterAssets, _rng: &mut gekko_math::HsdRng) {
+        if !f.core.accessory4_armed {
+            return;
+        }
+        match crate::climber::vars(f).accessory {
+            crate::climber::Accessory::IceShot => crate::special_n::accessory(f, assets),
+            crate::climber::Accessory::RopeAnchor => {
+                crate::special_hi::partner::anchor_accessory(f)
+            }
+            crate::climber::Accessory::Blizzard => crate::special_lw::accessory(f),
+            crate::climber::Accessory::None => {}
+        }
+    }
+    /// ftData_SpecialN/S/Hi/Lw[kind] and their aerial tables.
+    fn enter_special(
+        f: &mut Fighter,
+        slot: melee_ft::fighter::SpecialSlot,
+        airborne: bool,
+        assets: &FighterAssets,
+    ) {
+        crate::special::enter(f, slot, airborne, assets);
+    }
+    /// ftPp_Init_OnLoad (8011EF14): x2222_b5, PUSH_ATTRS, x40 = attributes
+    /// +0; the three item registrations (it_8026B3F8) belong to the item
+    /// scene. ftdata.c supplies every special.
+    ///
+    /// ftNn_Init_OnLoad (80122EB4): x2222_b4, PUSH_ATTRS (through
+    /// ftPp_Init_OnLoadForNana), x40 = attributes +C4. ftData_SpecialS and
+    /// ftData_SpecialHi (and their aerial tables) are NULL for Nana.
+    fn on_load(&mut self, capabilities: &mut Capabilities) {
+        // ft_GetGroundFrictionMultiplier (0x80084A50..5C): both climbers.
+        capabilities.fixed_traction = true;
+        match self.climber {
+            Climber::Popo => {
+                capabilities.leads_partner = true;
+                capabilities.spawn_offset = self.attributes.leader_spawn_offset;
+                capabilities.specials = [true; 4];
+            }
+            Climber::Nana => {
+                capabilities.refuses_healing_items = true;
+                capabilities.cpu_partner = true;
+                capabilities.spawn_offset = self.attributes.partner_spawn_offset;
+                capabilities.armor = self.attributes.partner_armor;
+                capabilities.specials = [false, false, true, true];
+            }
+        }
+    }
+    /// ftPp_Init_OnDeath (8011EFE8); ftNn_Init_OnDeath (80122F28):
+    /// dmg.armor0 = attributes +C8 (see `on_load`), then the shared reset.
+    fn on_reset(&mut self) {
+        self.vars.reset();
+    }
+}
+
+/// ftPp_Init_* strings; ftData_Table_Unk0[10] has 321 animation rows.
+pub const POPO_DESCRIPTOR: CharacterDescriptor = CharacterDescriptor {
+    kind: FighterKind::Popo,
+    common_behavior: melee_ft::fighter::assets::CommonBehavior::for_kind(FighterKind::Popo),
+    data_file: "PlPp.dat",
+    data_symbol: "ftDataPopo",
+    animation_file: "PlPpAJ.dat",
+    animation_count: 321,
+    part_count: PART_COUNT,
+    part_animation_count: PART_ANIMATION_COUNT,
+    additional_part_animations: &[],
+    costumes: &[
+        CostumeDescriptor {
+            file: "PlPpNr.dat",
+            joint_symbol: "PlyPopo5K_Share_joint",
+        },
+        CostumeDescriptor {
+            file: "PlPpGr.dat",
+            joint_symbol: "PlyPopo5KGr_Share_joint",
+        },
+        CostumeDescriptor {
+            file: "PlPpOr.dat",
+            joint_symbol: "PlyPopo5KOr_Share_joint",
+        },
+        CostumeDescriptor {
+            file: "PlPpRe.dat",
+            joint_symbol: "PlyPopo5KRe_Share_joint",
+        },
+    ],
+};
+
+/// ftNn_Init_* strings; ftData_Table_Unk0[11] has 321 animation rows.
+pub const NANA_DESCRIPTOR: CharacterDescriptor = CharacterDescriptor {
+    kind: FighterKind::Nana,
+    common_behavior: melee_ft::fighter::assets::CommonBehavior::for_kind(FighterKind::Nana),
+    data_file: "PlNn.dat",
+    data_symbol: "ftDataNana",
+    animation_file: "PlNnAJ.dat",
+    animation_count: 321,
+    part_count: PART_COUNT,
+    part_animation_count: PART_ANIMATION_COUNT,
+    additional_part_animations: &[],
+    costumes: &[
+        CostumeDescriptor {
+            file: "PlNnNr.dat",
+            joint_symbol: "PlyNana5K_Share_joint",
+        },
+        CostumeDescriptor {
+            file: "PlNnYe.dat",
+            joint_symbol: "PlyNana5KYe_Share_joint",
+        },
+        CostumeDescriptor {
+            file: "PlNnAq.dat",
+            joint_symbol: "PlyNana5KAq_Share_joint",
+        },
+        CostumeDescriptor {
+            file: "PlNnWh.dat",
+            joint_symbol: "PlyNana5KWh_Share_joint",
+        },
+    ],
+};
+/// PlCo ftPartsTable[10] and [11]: semantic parts.
+const PART_COUNT: u32 = 54;
+/// ftData.x1C part-animation groups (ftDataPopo +1C..+20, ftDataNana alike).
+const PART_ANIMATION_COUNT: usize = 3;

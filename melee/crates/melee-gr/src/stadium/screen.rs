@@ -1,0 +1,430 @@
+//! The jumbotron (map 1, `grStadium_Display` in gr/types.h): what it shows
+//! and for how long. Its pictures and text are presentation; its mode timer
+//! and the mode choice draw from the shared RNG, and its camera subject
+//! pulls the match camera toward the screen while a transformation is
+//! announced.
+use super::Parameters;
+use crate::rand::range;
+use gekko_math::HsdRng;
+
+/// `grStadium_Display::xE4`, the mode `grStadium_801D2528` selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenMode {
+    /// Text cleared (`grStadium_801D4194`).
+    Blank = 0,
+    /// Player names and the clock, or the timer (`grStadium_801D39A0`).
+    MatchInfo = 1,
+    /// Transformation announcements, one per destination form.
+    AnnounceBase = 2,
+    AnnounceFire = 3,
+    AnnounceGrass = 4,
+    AnnounceWater = 5,
+    AnnounceRock = 6,
+    /// The stage camera feed.
+    StageCamera = 7,
+    /// A close-up of one player (`xEE`).
+    PlayerCamera = 8,
+    /// "Player N Defeated" (`grStadium_801D3A0C`, from gm_8016B8D4).
+    PlayerDefeated = 9,
+    /// Static messages (`grStadium_801D3F40`): the Versus countdown start,
+    /// its end, the match end and the Sudden Death countdown start.
+    CountdownStart = 10,
+    CountdownEnd = 11,
+    MatchEnd = 12,
+    SuddenDeathStart = 13,
+    /// Remaining players in standing order (`grStadium_801D3BBC`).
+    Standings = 14,
+    /// Picture layers 0x20 and 0x80 (TODO(meaning)).
+    Picture15 = 15,
+    Picture16 = 16,
+    /// Clears both text windows.
+    ClearText = 17,
+}
+impl TryFrom<i16> for ScreenMode {
+    type Error = i16;
+    fn try_from(value: i16) -> Result<Self, i16> {
+        use ScreenMode::*;
+        Ok(match value {
+            0 => Blank,
+            1 => MatchInfo,
+            2 => AnnounceBase,
+            3 => AnnounceFire,
+            4 => AnnounceGrass,
+            5 => AnnounceWater,
+            6 => AnnounceRock,
+            7 => StageCamera,
+            8 => PlayerCamera,
+            9 => PlayerDefeated,
+            10 => CountdownStart,
+            11 => CountdownEnd,
+            12 => MatchEnd,
+            13 => SuddenDeathStart,
+            14 => Standings,
+            15 => Picture15,
+            16 => Picture16,
+            17 => ClearText,
+            _ => return Err(value),
+        })
+    }
+}
+
+/// `grStadium_Display::xEE` before any player has been shown.
+pub const NO_FOCUS: i16 = 99;
+/// Player slots `grStadium_801D2528` scans for the close-up.
+const PLAYER_SLOTS: i16 = 6;
+
+/// What the screen asks of the players it looks at.
+pub trait ScreenPlayers {
+    /// `Player_GetEntity(slot) != NULL`.
+    fn exists(&self, slot: i16) -> bool;
+    /// `Player_8003219C`: the fighter's x221F_b3 (its procs are suppressed).
+    fn suppressed(&self, slot: i16) -> bool;
+    /// `grStadium_801D32D0`: the close-up box around the player's camera
+    /// bone lies inside the viewport.
+    fn framed(&mut self, slot: i16) -> bool;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Screen {
+    /// xE4.
+    pub mode: ScreenMode,
+    /// xEA; `None` is retail's -1 before the first change.
+    pub previous: Option<ScreenMode>,
+    /// xE0: ticks left in a timed mode, post-decremented.
+    pub timer: i32,
+    /// xEE: the player of the close-up.
+    pub focus: i16,
+    /// xF2: modes chosen since the last standings.
+    pub cycles: i16,
+    /// xF4: the camera subject Ground_801C0FB8's deferred fn_801D11E4
+    /// creates; the camera frames the screen while it is active.
+    pub subject: Option<melee_cm::Subject>,
+}
+
+/// What the screen shows and when its mode began and ends, worked out from
+/// the mode and its timer for readers outside the tick ([`Screen::showing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Showing {
+    pub mode: ScreenMode,
+    /// The mode it replaced.
+    pub previous: Option<ScreenMode>,
+    /// How many runs of the screen's proc from now the mode's timer chooses
+    /// the next one (1: the next run); `None` for a mode without a timer.
+    pub ends_in: Option<u32>,
+    /// How many runs of the proc ago the mode was entered (0: the last
+    /// run), for a mode whose length is fixed; `None` where the length was
+    /// drawn or the mode has no timer.
+    pub entered: Option<u32>,
+    /// `grStadium_801D2A60` chose the mode without a draw and
+    /// `grStadium_801D2528` drew no length for it: the standings, after
+    /// `standings_interval` choices. Nothing in the random stream shows
+    /// when such a mode began.
+    pub entered_without_draw: bool,
+}
+
+/// fn_801D11E4 (0x801D11E4): the subject sits at the screen's height with
+/// its reach, both under map scale.
+const SUBJECT_HEIGHT: f32 = 30.0;
+const SUBJECT_HALF_WIDTH: f32 = 25.0;
+const SUBJECT_HALF_HEIGHT: f32 = 10.0;
+
+impl Screen {
+    /// `grStadium_801D2278` (0x801D2278): mode 1 is written directly, then
+    /// `grStadium_801D2528(gobj, 0, 0)` blanks it.
+    pub fn new(parameters: &Parameters, rng: &mut HsdRng) -> Self {
+        let mut screen = Self {
+            mode: ScreenMode::MatchInfo,
+            previous: None,
+            timer: 0,
+            focus: NO_FOCUS,
+            cycles: 0,
+            subject: None,
+        };
+        screen.set_mode(ScreenMode::Blank, 0, parameters, rng, &mut NoPlayers);
+        screen
+    }
+
+    /// `grStadium_801D2528` (0x801D2528) outside Training mode: the timer,
+    /// focus and camera-subject effects of entering `mode`. A nonzero
+    /// `timer` overrides the mode's own.
+    pub fn set_mode(
+        &mut self,
+        mode: ScreenMode,
+        timer: i32,
+        parameters: &Parameters,
+        rng: &mut HsdRng,
+        players: &mut impl ScreenPlayers,
+    ) {
+        use ScreenMode::*;
+        self.previous = Some(self.mode);
+        self.mode = mode;
+        let mut subject = Some(false);
+        match mode {
+            Blank | CountdownStart | CountdownEnd | MatchEnd | SuddenDeathStart => {}
+            MatchInfo | Picture15 | Picture16 => self.timer = parameters.info_frames,
+            PlayerDefeated => self.timer = parameters.defeat_frames,
+            Standings => self.timer = parameters.standings_frames,
+            StageCamera => self.timer = range(rng, parameters.stage_camera_frames),
+            PlayerCamera => {
+                self.timer = range(rng, parameters.player_camera_frames);
+                self.next_focus(players);
+            }
+            // grpstadium.c:1079-1086 leaves the subject as it was.
+            ClearText => subject = None,
+            AnnounceBase | AnnounceFire | AnnounceGrass | AnnounceWater | AnnounceRock => {
+                self.timer = parameters.announce_frames;
+                subject = Some(true);
+            }
+        }
+        if let (Some(active), Some(state)) = (subject, self.subject.as_mut()) {
+            state.state = if active {
+                melee_cm::SubjectState::Active
+            } else {
+                melee_cm::SubjectState::Inactive
+            };
+        }
+        if timer != 0 {
+            self.timer = timer;
+        }
+    }
+
+    /// grpstadium.c:1059-1072: the next existing player after the current
+    /// focus, wrapping at six slots; after two wraps the timer expires.
+    fn next_focus(&mut self, players: &impl ScreenPlayers) {
+        let start = self.focus;
+        self.focus = self.focus.wrapping_add(1);
+        let mut wraps = 0;
+        while self.focus != start {
+            if self.focus >= PLAYER_SLOTS {
+                self.focus = 0;
+                wraps += 1;
+                if wraps > 2 {
+                    self.focus = 0;
+                    self.timer = -1;
+                    break;
+                }
+            }
+            if players.exists(self.focus) {
+                break;
+            }
+            self.focus += 1;
+        }
+    }
+
+    /// fn_801D11E4 (0x801D11E4): Camera_80029020 links a fresh (active)
+    /// subject, which is at once made inactive and placed. Five fmuls.
+    pub fn create_subject(&mut self, scale: f32) {
+        let mut subject = melee_cm::Subject::new(melee_cm::SubjectState::Active);
+        subject.state = melee_cm::SubjectState::Inactive;
+        subject.position = hsd_types::Vec3::new(0.0, SUBJECT_HEIGHT * scale, 0.0);
+        subject.target_extents.left = -SUBJECT_HALF_WIDTH * scale;
+        subject.target_extents.right = SUBJECT_HALF_WIDTH * scale;
+        subject.target_extents.top = SUBJECT_HALF_HEIGHT * scale;
+        subject.target_extents.bottom = -SUBJECT_HALF_HEIGHT * scale;
+        self.subject = Some(subject);
+    }
+
+    /// The screen between two runs of its proc. It reads only what the proc
+    /// keeps (xE0, xE4, xEA); the standings' length is the parameter
+    /// `grStadium_801D2528` loads their timer with.
+    pub fn showing(&self, parameters: &Parameters) -> Showing {
+        use ScreenMode::*;
+        let timed = !matches!(
+            self.mode,
+            Blank | CountdownStart | CountdownEnd | MatchEnd | SuddenDeathStart | ClearText
+        );
+        // `expire` lets a timer of zero show once more: timer + 2 runs.
+        let ends_in = timed.then(|| (self.timer.max(-1) + 2) as u32);
+        let standings = self.mode == Standings;
+        let entered = (standings && (-1..=parameters.standings_frames).contains(&self.timer))
+            .then(|| (parameters.standings_frames - self.timer) as u32);
+        Showing {
+            mode: self.mode,
+            previous: self.previous,
+            ends_in,
+            entered,
+            entered_without_draw: standings,
+        }
+    }
+
+    /// Post-decrement test shared by the timed modes: a timer of zero still
+    /// shows one more tick.
+    fn expire(&mut self) -> bool {
+        let old = self.timer;
+        self.timer -= 1;
+        old < 0
+    }
+
+    /// `grStadium_801D2344` (0x801D2344), the screen's per-tick proc after
+    /// the audience flash. Text and picture updates are presentation.
+    pub fn tick(
+        &mut self,
+        parameters: &Parameters,
+        rng: &mut HsdRng,
+        players: &mut impl ScreenPlayers,
+    ) {
+        use ScreenMode::*;
+        match self.mode {
+            Blank | CountdownStart | CountdownEnd | MatchEnd | SuddenDeathStart | ClearText => {}
+            MatchInfo | PlayerDefeated | Standings | AnnounceBase | AnnounceFire
+            | AnnounceGrass | AnnounceWater | AnnounceRock | Picture15 | Picture16
+            | StageCamera => {
+                if self.expire() {
+                    self.advance(parameters, rng, players);
+                }
+            }
+            PlayerCamera => {
+                // grpstadium.c:898-912: the timer, then the player, then the
+                // framing; each failure moves on (the second checks repeat).
+                let lost = self.expire()
+                    || !players.exists(self.focus)
+                    || players.suppressed(self.focus)
+                    || !players.framed(self.focus);
+                if lost {
+                    self.advance(parameters, rng, players);
+                }
+            }
+        }
+    }
+
+    /// `grStadium_801D2A60` (0x801D2A60): after `standings_interval` choices
+    /// show the standings, else draw a weighted mode different from the
+    /// current and previous ones. No multiply-add: 801D2B04 fmuls,
+    /// 801D2B08 fsubs, each weight converted from int then fsubs.
+    fn advance(
+        &mut self,
+        parameters: &Parameters,
+        rng: &mut HsdRng,
+        players: &mut impl ScreenPlayers,
+    ) {
+        let w = &parameters.mode_weights;
+        let mode = if self.cycles >= parameters.standings_interval {
+            self.cycles = 0;
+            ScreenMode::Standings
+        } else {
+            loop {
+                let total = i32::from(w.player_camera)
+                    + (i32::from(w.match_info) + i32::from(w.stage_camera) + i32::from(w.picture));
+                let mut value = rng.randf() * total as f32 - f32::from(w.player_camera);
+                let mode = if value < 0.0 {
+                    ScreenMode::PlayerCamera
+                } else {
+                    value -= f32::from(w.stage_camera);
+                    if value < 0.0 {
+                        ScreenMode::StageCamera
+                    } else {
+                        value -= f32::from(w.match_info);
+                        if value < 0.0 {
+                            ScreenMode::MatchInfo
+                        } else if value - f32::from(w.picture) < 0.0 {
+                            ScreenMode::Picture15
+                        } else {
+                            ScreenMode::MatchInfo
+                        }
+                    }
+                };
+                if mode != self.mode && Some(mode) != self.previous {
+                    break mode;
+                }
+            }
+        };
+        self.cycles += 1;
+        self.set_mode(mode, 0, parameters, rng, players);
+    }
+}
+
+/// Before any fighter exists (Ground creation).
+struct NoPlayers;
+impl ScreenPlayers for NoPlayers {
+    fn exists(&self, _: i16) -> bool {
+        false
+    }
+    fn suppressed(&self, _: i16) -> bool {
+        false
+    }
+    fn framed(&mut self, _: i16) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stadium::ModeWeights;
+
+    fn parameters() -> Parameters {
+        Parameters {
+            base_frames: [0; 2],
+            form_frames: [0; 2],
+            announce_delay: 0,
+            sink_frames: 0,
+            sunk_frames: 0,
+            info_frames: 200,
+            defeat_frames: 200,
+            announce_frames: 200,
+            standings_frames: 300,
+            player_camera_frames: [600, 1200],
+            stage_camera_frames: [600, 1200],
+            mode_weights: ModeWeights {
+                player_camera: 1,
+                match_info: 1,
+                stage_camera: 1,
+                picture: 1,
+            },
+            standings_interval: 2,
+        }
+    }
+
+    /// One player, never inside the close-up's box.
+    struct Unframed;
+    impl ScreenPlayers for Unframed {
+        fn exists(&self, slot: i16) -> bool {
+            slot == 0
+        }
+        fn suppressed(&self, _: i16) -> bool {
+            false
+        }
+        fn framed(&mut self, _: i16) -> bool {
+            false
+        }
+    }
+
+    /// The standings' timer says when they began and when they end: 302
+    /// runs of the proc after the one that entered them, none of them
+    /// drawing.
+    #[test]
+    fn the_standings_show_when_they_began_and_when_they_end() {
+        let parameters = parameters();
+        let mut rng = HsdRng::new(1);
+        let mut screen = Screen::new(&parameters, &mut rng);
+        assert_eq!(screen.showing(&parameters).ends_in, None);
+        screen.set_mode(ScreenMode::PlayerCamera, 0, &parameters, &mut rng, &mut Unframed);
+        let close_up = screen.showing(&parameters);
+        assert_eq!(close_up.mode, ScreenMode::PlayerCamera);
+        assert!(close_up.ends_in.is_some_and(|runs| runs > 1), "{close_up:?}");
+        assert_eq!((close_up.entered, close_up.entered_without_draw), (None, false));
+
+        // The next run loses the close-up; with the interval reached the
+        // standings follow without a draw.
+        screen.cycles = parameters.standings_interval;
+        let seed = rng.seed;
+        for run in 0..302 {
+            screen.tick(&parameters, &mut rng, &mut Unframed);
+            let showing = screen.showing(&parameters);
+            assert_eq!(
+                (showing.mode, showing.previous, showing.entered_without_draw),
+                (ScreenMode::Standings, Some(ScreenMode::PlayerCamera), true),
+                "run {run}"
+            );
+            assert_eq!(
+                (showing.entered, showing.ends_in),
+                (Some(run), Some(302 - run)),
+                "run {run}"
+            );
+            assert_eq!(rng.seed, seed, "run {run}");
+        }
+        screen.tick(&parameters, &mut rng, &mut Unframed);
+        assert_ne!(screen.showing(&parameters).mode, ScreenMode::Standings);
+        assert_ne!(rng.seed, seed, "the mode after the standings is drawn");
+    }
+}

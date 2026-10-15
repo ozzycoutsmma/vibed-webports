@@ -1,0 +1,8 @@
+[package]
+name = "melee-test-support"
+description = "Dev-only local oracle data policy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+melee-trace-io = { path = "../melee-trace-io" }

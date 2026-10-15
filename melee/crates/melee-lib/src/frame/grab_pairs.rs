@@ -1,0 +1,947 @@
+//! Fighter-list traversal for grabs; character implementations stay in melee-ft.
+use super::*;
+use crate::scene_fighter::{with_fighter, SceneFighter};
+use melee_ft::fighter::grab::{self, GrabLink};
+use melee_ft::fighter::grab_throw;
+
+fn pair(
+    fighters: &mut [SceneFighter],
+    first: usize,
+    second: usize,
+) -> (&mut SceneFighter, &mut SceneFighter) {
+    assert_ne!(first, second);
+    if first < second {
+        let (left, right) = fighters.split_at_mut(second);
+        (&mut left[first], &mut right[0])
+    } else {
+        let (left, right) = fighters.split_at_mut(first);
+        (&mut right[0], &mut left[second])
+    }
+}
+
+pub(super) fn select(state: &mut InitialState, player: usize) -> Result<()> {
+    let mut nearest = None;
+    let mut distance = f32::MAX;
+    for other in 0..state.fighters.len() {
+        // ftLib_80086FD4: never the grabber's own player (Popo and Nana).
+        let same_player = state.fighters[other].player.id == state.fighters[player].player.id;
+        if other == player || same_player {
+            continue;
+        }
+        let (attacker, victim) = pair(&mut state.fighters, player, other);
+        let candidate = with_fighter!(attacker, |a| with_fighter!(victim, |v| grab::candidate(
+            v,
+            a,
+            &mut state.map
+        )));
+        if let Some(candidate) = candidate {
+            if candidate < distance {
+                distance = candidate;
+                nearest = Some(other);
+            }
+        }
+    }
+    if let Some(other) = nearest {
+        // gm_8016C5C0 / fn_8016588C: stock standings, ties share a rank.
+        let stocks = with_fighter!(&state.fighters[other], |f| f.player.stocks);
+        let rank = state
+            .fighters
+            .iter()
+            .filter(|f| with_fighter!(f, |f| !f.player.secondary && f.player.stocks > stocks))
+            .count() as u8;
+        let (attacker, victim) = pair(&mut state.fighters, player, other);
+        with_fighter!(attacker, |a| with_fighter!(victim, |v| grab::capture_pair(
+            v,
+            a,
+            &state.assets.fighters[other],
+            &state.assets.fighters[player],
+            &mut state.map,
+            rank
+        )))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
+    Ok(())
+}
+
+pub(super) fn align(state: &mut InitialState, player: usize) -> Result<()> {
+    // fn_800DAD18 is a physics callback; Fighter_procUpdate skips it during
+    // hitlag. It still runs for a capture pinned in the captor's mouth, not
+    // for Egg Lay's catch (ftCo_CaptureYoshi_Phys is empty).
+    if with_fighter!(&state.fighters[player], |f| f.status.disabled
+        || f.in_hitlag()
+        || matches!(
+            f.motion_state.id,
+            melee_types::CommonMotionState::ThrownF
+                | melee_types::CommonMotionState::ThrownB
+                | melee_types::CommonMotionState::ThrownHi
+                | melee_types::CommonMotionState::ThrownLw
+                | melee_types::CommonMotionState::CaptureYoshi
+                | melee_types::CommonMotionState::CaptureCaptain
+                // ftCo_Shouldered_Phys and the cargo throws' victims: empty.
+                | melee_types::CommonMotionState::ShoulderedWait
+                | melee_types::CommonMotionState::ShoulderedWalkSlow
+                | melee_types::CommonMotionState::ShoulderedWalkMiddle
+                | melee_types::CommonMotionState::ShoulderedWalkFast
+                | melee_types::CommonMotionState::ShoulderedTurn
+                | melee_types::CommonMotionState::ThrownFF
+                | melee_types::CommonMotionState::ThrownFB
+                | melee_types::CommonMotionState::ThrownFHi
+                | melee_types::CommonMotionState::ThrownFLw
+        )
+        // The Koopa Klaw's rows have no physics callback either, nor the
+        // rows of a fighter Kirby inhaled.
+        || matches!(
+            f.state_data,
+            melee_ft::fighter::MotionData::CaptureKoopa(_)
+        )
+        || melee_ft::fighter::capture_kirby::captured(&f.core))
+    {
+        return Ok(());
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Captured { captor }) = link else {
+        return Ok(());
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == captor))
+        .expect("live captor");
+    let (victim, attacker) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(
+        victim,
+        |v| grab::align_capture(v, a, &state.assets.fighters[player], &mut state.map)
+    ))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+pub(super) fn sync_wait(state: &mut InitialState, player: usize) -> Result<()> {
+    let victim = with_fighter!(&state.fighters[player], |f| {
+        if f.motion_state.id == melee_types::CommonMotionState::CatchWait {
+            if let Some(GrabLink::Holding { victim, .. }) = f.combat.grab {
+                Some(victim)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+    let Some(victim) = victim else {
+        return Ok(());
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .expect("live captured fighter");
+    let pulled = with_fighter!(&state.fighters[other], |f| matches!(
+        f.motion_state.id,
+        melee_types::CommonMotionState::CapturePulledLw
+            | melee_types::CommonMotionState::CapturePulledHi
+    ));
+    if !pulled {
+        return Ok(());
+    }
+    let (attacker, victim) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        let entered = grab::capture_wait(v, &state.assets.fighters[other]);
+        if entered.is_ok() {
+            grab::constrain_in_mouth(
+                &mut v.core,
+                &mut a.core,
+                &state.assets.fighters[other],
+                &state.assets.fighters[player],
+            );
+        }
+        entered
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// Enters a requested throw; returns the victim's index when one began.
+pub(super) fn throw_input(state: &mut InitialState, player: usize) -> Result<Option<usize>> {
+    let Some(throw) = with_fighter!(&state.fighters[player], |f| {
+        grab_throw::requested(f, &state.assets.fighters[player])
+    }) else {
+        return Ok(None);
+    };
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Holding { victim, .. }) = link else {
+        panic!("throw without victim");
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .expect("live victim");
+    let (attacker, victim) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        let entered = grab_throw::enter_throw(
+            throw,
+            v,
+            a,
+            &state.assets.fighters[other],
+            &state.assets.fighters[player],
+        );
+        // ftCo_CatchWait_IASA: it_802A7AAC after the throw's entry.
+        if entered.is_ok() {
+            a.release_tether();
+        }
+        entered
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(Some(other))
+}
+
+pub(super) fn constrain(state: &mut InitialState, player: usize) {
+    if !with_fighter!(&state.fighters[player], |f| f.combat.thrown_pose.is_some()) {
+        return;
+    }
+    // A thrown victim hangs from its captor; a Falcon Dive captor hangs
+    // from its grounded victim (ftCo_800DB368 with the roles swapped).
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let anchor = match link {
+        Some(GrabLink::Captured { captor }) => captor,
+        Some(GrabLink::Holding { victim, .. }) => victim,
+        None => panic!("constrained without a partner"),
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == anchor))
+        .expect("live constraint anchor");
+    let (victim, attacker) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        grab_throw::update_constraint(
+            v,
+            a,
+            &state.assets.fighters[player],
+            &state.assets.fighters[other],
+        )
+    }));
+}
+
+pub(super) fn release(state: &mut InitialState, player: usize) -> Result<()> {
+    // The common throws and the cargo carrier's (ftCo_800DD724).
+    if !with_fighter!(&state.fighters[player], |f| (matches!(
+        f.motion_state.id,
+        melee_types::CommonMotionState::ThrowF
+            | melee_types::CommonMotionState::ThrowB
+            | melee_types::CommonMotionState::ThrowHi
+            | melee_types::CommonMotionState::ThrowLw
+    ) || f.in_cargo_throw())
+        && f.commands.grab_release)
+    {
+        return Ok(());
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Holding { victim, .. }) = link else {
+        // ftCo_800DD724 (ftCo_Throw.c:269-278): the flag is spent and the
+        // thrower can be grabbed again, with nobody left to release (the
+        // thrown fighter mashed out, ftCo_800DE5A4).
+        with_fighter!(&mut state.fighters[player], |f| {
+            assert!(!f.in_cargo_throw(), "a cargo throw without a victim");
+            f.core.commands.grab_release = false;
+            f.core.status.grab_exclusions = melee_ft::fighter::ledge::GrabExclusions::NONE;
+        });
+        return Ok(());
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .expect("live victim");
+    let (attacker, victim) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        grab_throw::release_throw(
+            v,
+            a,
+            &state.assets.fighters[other],
+            &state.assets.fighters[player],
+            &mut state.map,
+            &mut state.rng,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// What a thrower's callback asked of the fighter it holds: ftCo_800DE920
+/// on the script's flag (ftCo_800DD724, the thrower's animation callback or
+/// its landing), ftCo_800DE974 when the thrower lands (fn_800DD568,
+/// fn_800DD5EC, its collision callback). Nothing for a thrower that holds
+/// nobody any more.
+pub(super) fn thrown_request(state: &mut InitialState, player: usize) {
+    use melee_ft::fighter::throw_flight;
+    let request = with_fighter!(&mut state.fighters[player], |f| std::mem::take(
+        &mut f.combat.thrown_request
+    ));
+    if request == throw_flight::ThrownRequest::default() {
+        return;
+    }
+    let Some(other) = held_victim(state, player) else {
+        return;
+    };
+    // lb_8000C1C0: the held fighter's animation step reads the thrower's
+    // TransN2 as it now stands.
+    constrain(state, other);
+    with_fighter!(&mut state.fighters[other], |v| {
+        if let Some(frame) = request.freeze_at {
+            v.core.freeze_thrown(frame);
+        }
+        if request.clear_blast_exemption {
+            v.core.status.blast_zone_exempt = false;
+        }
+        if request.resume {
+            throw_flight::resume_thrown(v, &state.assets.fighters[other]);
+        }
+    });
+}
+
+/// ftCo_800DE5A4: a thrown fighter that kept its grab timer spent it. It
+/// leaves the throw by fn_800DC070 or ftCo_CaptureCut_Enter, whose
+/// ftCo_800DC920 reads the thrower. Returns whether it did.
+pub(super) fn thrown_escape(state: &mut InitialState, player: usize) -> Result<bool> {
+    let Some(escape) = with_fighter!(&mut state.fighters[player], |f| f
+        .combat
+        .thrown_hold
+        .escape
+        .take())
+    else {
+        return Ok(false);
+    };
+    let other = captor_of(state, player).expect("a thrown fighter's thrower");
+    let (victim, thrower) = pair(&mut state.fighters, player, other);
+    with_fighter!(thrower, |t| with_fighter!(victim, |v| {
+        melee_ft::fighter::throw_flight::escape_thrown(
+            v,
+            t,
+            &state.assets.fighters[player],
+            &mut state.map,
+            escape,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(true)
+}
+
+/// The cargo carrier's state changes move the fighter it holds
+/// (ftCo_8009C5A4, ftCo_8009C640, ftCo_800DE3FC within the carrier's
+/// callback). Returns the victim's index when its motion changed.
+pub(super) fn cargo(state: &mut InitialState, player: usize) -> Result<Option<usize>> {
+    use melee_ft::fighter::cargo;
+    let requests = with_fighter!(&mut state.fighters[player], |f| std::mem::take(
+        &mut f.combat.cargo_requests
+    ));
+    if requests.is_empty() {
+        return Ok(None);
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Holding { victim, .. }) = link else {
+        panic!("cargo carry without a victim");
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .expect("live carried fighter");
+    let (carrier, victim) = pair(&mut state.fighters, player, other);
+    with_fighter!(carrier, |c| with_fighter!(victim, |v| {
+        requests.iter().try_for_each(|request| {
+            cargo::apply(
+                *request,
+                v,
+                c,
+                &state.assets.fighters[other],
+                &state.assets.fighters[player],
+            )
+        })
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(Some(other))
+}
+
+/// ftCo_Shouldered_Anim reads its carrier's ground_or_air (the mash
+/// decrement's aerial scale).
+pub(super) fn offer_carrier_ground(state: &mut InitialState, player: usize) {
+    if !with_fighter!(&state.fighters[player], |f| f.shouldered()) {
+        return;
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Captured { captor }) = link else {
+        panic!("shouldered without a carrier");
+    };
+    let airborne = state
+        .fighters
+        .iter()
+        .find(|f| with_fighter!(f, |f| f.spawn_number == captor))
+        .is_some_and(|f| {
+            with_fighter!(f, |f| f.physics.ground_or_air
+                == melee_types::GroundOrAir::Air)
+        });
+    with_fighter!(&mut state.fighters[player], |f| f
+        .core
+        .combat
+        .carrier_airborne = airborne);
+}
+
+/// ftCo_Shouldered_Anim's breakout: the carried fighter's mashing spent
+/// its timer; both fighters are launched within its animation callback.
+/// Returns the carrier's index when the carry ended.
+pub(super) fn shoulder_escape(state: &mut InitialState, player: usize) -> Result<Option<usize>> {
+    if !with_fighter!(&mut state.fighters[player], |f| std::mem::take(
+        &mut f.combat.shoulder_escape
+    )) {
+        return Ok(None);
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Captured { captor }) = link else {
+        panic!("shouldered without a carrier");
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == captor))
+        .expect("live carrier");
+    let (victim, carrier) = pair(&mut state.fighters, player, other);
+    with_fighter!(carrier, |c| with_fighter!(victim, |v| {
+        melee_ft::fighter::cargo::escape(
+            v,
+            c,
+            &state.assets.fighters[player],
+            &state.assets.fighters[other],
+            &mut state.map,
+            &mut state.rng,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(Some(other))
+}
+
+/// ftCo_800DD100: `dead` died while linked to `partner` (its link is
+/// already gone). A partner pinned to it (a thrown or carried fighter) is
+/// set down by ftCo_800DC920's constrained path first.
+pub(super) fn release_from_dead_partner(
+    state: &mut InitialState,
+    dead: usize,
+    partner: usize,
+) -> Result<()> {
+    let (dead_fighter, partner_fighter) = pair(&mut state.fighters, dead, partner);
+    with_fighter!(dead_fighter, |d| with_fighter!(partner_fighter, |p| {
+        p.release_from_dead_partner(
+            d,
+            &state.assets.fighters[partner],
+            &state.assets.fighters[dead],
+            &mut state.map,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// CaptureWait's timer is owned by the victim; release both before overlap.
+pub(super) fn escape(state: &mut InitialState, player: usize) -> Result<()> {
+    let captor = with_fighter!(&mut state.fighters[player], |f| {
+        if matches!(
+            f.motion_state.id,
+            melee_types::CommonMotionState::CaptureWaitLw
+                | melee_types::CommonMotionState::CaptureWaitHi
+        ) {
+            let melee_ft::fighter::MotionData::Capture(capture) = &mut f.core.state_data else {
+                panic!("capture scratch missing")
+            };
+            if std::mem::take(&mut capture.release_requested) {
+                let Some(GrabLink::Captured { captor }) = f.combat.grab else {
+                    panic!("capture without captor")
+                };
+                Some(captor)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+    let Some(captor) = captor else {
+        return Ok(());
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == captor))
+        .expect("live captor");
+    let (victim, attacker) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        melee_ft::fighter::grab_escape::release(
+            v,
+            a,
+            &state.assets.fighters[player],
+            &state.assets.fighters[other],
+            &mut state.map,
+            melee_ft::fighter::grab_escape::ReleaseCause::TimerExpired,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// Map owns both fighters because counterpart entries recompute captor.x2170.
+pub(super) fn map_capture(state: &mut InitialState, player: usize) -> Result<()> {
+    let link = with_fighter!(&state.fighters[player], |f| {
+        if f.status.disabled || f.combat.thrown_pose.is_some() {
+            None
+        } else {
+            f.combat.grab
+        }
+    });
+    let Some(GrabLink::Captured { captor }) = link else {
+        return Ok(());
+    };
+    // CaptureCaptain has its own collision callback; CaptureKirby's is empty.
+    if with_fighter!(&state.fighters[player], |f| f.in_capture_captain()
+        || melee_ft::fighter::capture_kirby::captured(&f.core))
+    {
+        return Ok(());
+    }
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == captor))
+        .expect("live captor");
+    let (victim, attacker) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        grab::map_capture(v, a, &state.assets.fighters[player], &mut state.map, true)
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// fn_800DA190 / DA4A0 / DA678: holding-state accessory alignment.
+/// Returns the victim's index when the captor's separation released the pair.
+pub(super) fn accessory(state: &mut InitialState, player: usize) -> Result<Option<usize>> {
+    let victim = with_fighter!(&state.fighters[player], |f| {
+        // fn_800DA190 (800DA190), the pull's accessory1 (fn_800D9CE8,
+        // 0x800D9E44): Link, Samus and Young Link (0x800DA1A4..C0) skip
+        // fn_800DA054 while their article reels the catch in. They are
+        // the kinds fn_800D9CE8 gives the article's tip as hold joint
+        // (`holds_by_graft`); CatchWait and CatchAttack call it for every
+        // kind.
+        let reeling = f.core.holds_by_graft
+            && matches!(
+                f.motion_state.id,
+                melee_types::CommonMotionState::CatchPull
+                    | melee_types::CommonMotionState::CatchDashPull
+            );
+        if f.status.disabled
+            || f.in_hitlag()
+            || reeling
+            || !matches!(f.state_data, melee_ft::fighter::MotionData::Catch { .. })
+        {
+            None
+        } else if let Some(GrabLink::Holding { victim, .. }) = f.combat.grab {
+            Some(victim)
+        } else {
+            None
+        }
+    });
+    let Some(victim) = victim else {
+        return Ok(None);
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .expect("live capture accessory victim");
+    let (attacker, victim) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        if grab::capture_accessory(v, a, &state.assets.fighters[other]) {
+            melee_ft::fighter::grab_escape::release(
+                v,
+                a,
+                &state.assets.fighters[other],
+                &state.assets.fighters[player],
+                &mut state.map,
+                melee_ft::fighter::grab_escape::ReleaseCause::CaptorSeparation,
+            )
+            .map(|()| Some(other))
+        } else {
+            Ok(None)
+        }
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// Fighter_ProcessHit -> ftCo_8008EC90: a launched member of a grab pair
+/// decides for both before its own hit processing.
+pub(super) fn linked_hit(state: &mut InitialState, player: usize) -> Result<()> {
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let partner = match link {
+        Some(GrabLink::Holding { victim, .. }) => victim,
+        Some(GrabLink::Captured { captor }) => captor,
+        None => return Ok(()),
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == partner))
+        .expect("live grab partner");
+    let (fighter, partner) = pair(&mut state.fighters, player, other);
+    let pause_effects = with_fighter!(fighter, |f| with_fighter!(partner, |p| {
+        melee_ft::fighter::grab_damage::resolve_linked_hit(
+            f,
+            p,
+            &state.assets.fighters[player],
+            &state.assets.fighters[other],
+            &mut state.map,
+            &mut state.rng,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if pause_effects {
+        // ftCo_8008EC90: the captor's pre_hitlag_cb (efLib_PauseAll) runs on
+        // this captured fighter's gobj.
+        state.effects.set_owner_hitlag(player, true);
+    }
+    Ok(())
+}
+
+/// ftCo_8008EC90's tail for a launched captured fighter whose captor was not
+/// hit: after this fighter's launch, ftCommon_8007DB58 and ftCo_800DE2F0 on
+/// the captor it was freed from.
+pub(super) fn release_captor(state: &mut InitialState, player: usize) -> Result<()> {
+    let captor = with_fighter!(&mut state.fighters[player], |f| f
+        .combat
+        .release_captor
+        .take());
+    let Some(captor) = captor else {
+        return Ok(());
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == captor))
+        .expect("released captor");
+    with_fighter!(&mut state.fighters[other], |f| {
+        melee_ft::fighter::grab_damage::launch_released_captor(
+            f,
+            &state.assets.fighters[other],
+            &mut state.rng,
+        )
+    })
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// x2219_b5 for `player` (melee_ft::fighter::hitlag_link).
+pub(super) fn in_hitlag(state: &InitialState, player: usize) -> bool {
+    with_fighter!(&state.fighters[player], |f| f.in_hitlag())
+}
+
+/// The fighter `player`'s x1A5C names, by fighter index: the other member
+/// of its grab pair, or the partner a special linked it to.
+fn grab_partner(state: &InitialState, player: usize) -> Option<usize> {
+    let (grab, link) = with_fighter!(&state.fighters[player], |f| (
+        f.combat.grab,
+        f.combat.hitlag_link
+    ));
+    let special = link.partner;
+    let partner = match grab {
+        // The grip outlives a link a special wrote over (Nana's, when
+        // Popo's Squall Hammer starts without her).
+        Some(GrabLink::Holding { .. }) if link.grab_link_cleared => special?,
+        Some(GrabLink::Holding { victim, .. }) => victim,
+        Some(GrabLink::Captured { captor }) => captor,
+        None => special?,
+    };
+    state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == partner))
+}
+
+/// Fighter_ProcessHit's Fighter_UnkRecursiveFunc_8006D044: when `player`
+/// started hitlag during its ProcessHit (x2219_b5 was clear), its grab
+/// partner is held in hitlag with it.
+pub(super) fn hold_partner_hitlag(
+    state: &mut InitialState,
+    player: usize,
+    was_in_hitlag: bool,
+) -> Result<()> {
+    if was_in_hitlag || !in_hitlag(state, player) {
+        return Ok(());
+    }
+    let Some(other) = grab_partner(state, player) else {
+        return Ok(());
+    };
+    let (fighter, partner) = pair(&mut state.fighters, player, other);
+    let pause = with_fighter!(fighter, |f| with_fighter!(partner, |p| {
+        melee_ft::fighter::hitlag_link::hold_partner(f, p)
+    }));
+    if pause {
+        state.effects.set_owner_hitlag(other, true);
+    }
+    Ok(())
+}
+
+/// Fighter_8006A1BC -> Fighter_8006D10C: when `player`'s hitlag ended in its
+/// status proc, a grab partner it holds is released.
+pub(super) fn release_partner_hitlag(
+    state: &mut InitialState,
+    player: usize,
+    was_in_hitlag: bool,
+) -> Result<()> {
+    if !was_in_hitlag || in_hitlag(state, player) {
+        return Ok(());
+    }
+    let Some(other) = grab_partner(state, player) else {
+        return Ok(());
+    };
+    let (fighter, partner) = pair(&mut state.fighters, player, other);
+    let resume = with_fighter!(fighter, |f| with_fighter!(partner, |p| {
+        melee_ft::fighter::hitlag_link::release_partner(f, p)
+    }));
+    if resume {
+        state.effects.set_owner_hitlag(other, false);
+    }
+    Ok(())
+}
+
+/// ftYs_SpecialN2_0_Anim's inlineA1 acts on the swallowed fighter within
+/// Yoshi's animation callback: hide it (ftCo_800BBC88), then lay it as an
+/// egg (ftCo_800DE2CC, ftCo_800BBED4).
+pub(super) fn swallow(state: &mut InitialState, player: usize) -> Result<()> {
+    use melee_ft::fighter::capture_yoshi;
+    let requests = with_fighter!(&mut state.fighters[player], |f| std::mem::take(
+        &mut f.combat.capture_requests
+    ));
+    if requests == capture_yoshi::CaptureRequests::default() {
+        return Ok(());
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Holding { victim, .. }) = link else {
+        panic!("swallow without victim");
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .expect("live swallowed fighter");
+    let (yoshi, victim) = pair(&mut state.fighters, player, other);
+    with_fighter!(yoshi, |y| with_fighter!(victim, |v| {
+        if requests.hide {
+            capture_yoshi::hide_captured(&mut v.core);
+        }
+        match requests.lay_egg {
+            Some(parameters) => capture_yoshi::lay_egg(
+                v,
+                y,
+                &state.assets.fighters[other],
+                &state.assets.fighters[player],
+                &mut state.map,
+                parameters,
+            ),
+            None => Ok(()),
+        }
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// The held fighter's position for a captor's accessory proc (Falcon Dive's
+/// accessory4, ftCa_SpecialLw_800E550C); withdrawn after the proc.
+pub(super) fn offer_partner_position(state: &mut InitialState, player: usize) {
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Holding { victim, .. }) = link else {
+        return;
+    };
+    let position = state
+        .fighters
+        .iter()
+        .find(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .map(|f| with_fighter!(f, |f| f.physics.position));
+    with_fighter!(&mut state.fighters[player], |f| f.core.partner_position =
+        position);
+}
+
+pub(super) fn withdraw_partner_position(state: &mut InitialState, player: usize) {
+    with_fighter!(&mut state.fighters[player], |f| f.core.partner_position =
+        None);
+}
+
+/// A special's release of the fighter it caught, once the captor's
+/// animation callback asked for it: the captor's SPECIAL_RELEASE hook
+/// (Falcon Dive's ftCo_800DDDE4 / ftCo_800DE7C0, Confusion's ftCo_800DE2A8 /
+/// ftCo_80090780).
+pub(super) fn special_throw_release(state: &mut InitialState, player: usize) -> Result<()> {
+    let pending = with_fighter!(&mut state.fighters[player], |f| std::mem::take(
+        &mut f.combat.special_throw_release
+    ));
+    if !pending {
+        return Ok(());
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Holding { victim, .. }) = link else {
+        panic!("attached release without a victim");
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+        .expect("live victim");
+    let (attacker, victim) = pair(&mut state.fighters, player, other);
+    with_fighter!(attacker, |a| with_fighter!(victim, |v| {
+        (a.character.table().special_release)(
+            v,
+            a,
+            &state.assets.fighters[other],
+            &state.assets.fighters[player],
+            &mut state.map,
+            &mut state.rng,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// The fighter index of the one `player` holds.
+fn held_victim(state: &InitialState, player: usize) -> Option<usize> {
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Holding { victim, .. }) = link else {
+        return None;
+    };
+    state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == victim))
+}
+
+/// What a Koopa Klaw captor's callback asked of the fighter it holds
+/// (ftCo_800BC9C8, ftCo_800BCDE0, ftCo_800BCE64), run on the
+/// pair once the callback has returned. Returns the victim's index.
+pub(super) fn koopa_captor_request(
+    state: &mut InitialState,
+    player: usize,
+) -> Result<Option<usize>> {
+    use melee_ft::fighter::capture_koopa::{self, CaptorRequest};
+    let Some(request) = with_fighter!(&mut state.fighters[player], |f| f
+        .combat
+        .koopa_request
+        .take())
+    else {
+        return Ok(None);
+    };
+    let other = held_victim(state, player).expect("a Koopa Klaw request without a victim");
+    let (captor, victim) = pair(&mut state.fighters, player, other);
+    let (va, ca) = (&state.assets.fighters[other], &state.assets.fighters[player]);
+    with_fighter!(captor, |c| with_fighter!(victim, |v| match request {
+        CaptorRequest::Damage { air } => capture_koopa::bite(v, c, va, ca, air),
+        CaptorRequest::Throw { back, air } => capture_koopa::throw(v, c, va, ca, back, air),
+        CaptorRequest::ThrowLanded { back } => capture_koopa::throw_landed(v, c, va, ca, back),
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(Some(other))
+}
+
+/// ftCo_CaptureDamageKoopa_Anim / ftCo_CaptureWaitKoopa_Anim found the hold
+/// timer spent: ftCo_800DA698 on the captor, ftCo_CaptureCut_Enter on the
+/// victim. Returns the captor's index.
+pub(super) fn koopa_escape(state: &mut InitialState, player: usize) -> Result<Option<usize>> {
+    use melee_ft::fighter::capture_koopa;
+    if !with_fighter!(&mut state.fighters[player], |f| {
+        capture_koopa::take_release_request(f)
+    }) {
+        return Ok(None);
+    }
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Captured { captor }) = link else {
+        panic!("a Koopa Klaw hold without a captor")
+    };
+    let other = state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == captor))
+        .expect("live captor");
+    let (victim, captor) = pair(&mut state.fighters, player, other);
+    with_fighter!(captor, |c| with_fighter!(victim, |v| {
+        capture_koopa::escape(
+            v,
+            c,
+            &state.assets.fighters[player],
+            &state.assets.fighters[other],
+            &mut state.map,
+        )
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(Some(other))
+}
+
+/// The fighter index of `player`'s captor.
+fn captor_of(state: &InitialState, player: usize) -> Option<usize> {
+    let link = with_fighter!(&state.fighters[player], |f| f.combat.grab);
+    let Some(GrabLink::Captured { captor }) = link else {
+        return None;
+    };
+    state
+        .fighters
+        .iter()
+        .position(|f| with_fighter!(f, |f| f.spawn_number == captor))
+}
+
+/// ftCo_800BD39C, CaptureKirby's accessory1: the inhaled fighter moves a
+/// step toward its captor's mouth as that now stands.
+pub(super) fn mouth_pull(state: &mut InitialState, player: usize) {
+    use melee_ft::fighter::capture_kirby;
+    if !with_fighter!(&state.fighters[player], |f| !f.status.disabled
+        && !f.in_hitlag()
+        && capture_kirby::pulling(&f.core))
+    {
+        return;
+    }
+    let other = captor_of(state, player).expect("an inhaled fighter's captor");
+    let (victim, captor) = pair(&mut state.fighters, player, other);
+    with_fighter!(captor, |c| with_fighter!(victim, |v| capture_kirby::pull(
+        &mut v.core,
+        &c.core
+    )));
+}
+
+/// What an inhaling captor's callback asked of the fighter in its mouth
+/// (ftCo_800BD620; ftCo_800DE2CC with ftCo_800BDB58 or ftCo_800BE000), run
+/// on the pair once the callback has returned. Returns the victim's index.
+pub(super) fn mouth_request(state: &mut InitialState, player: usize) -> Result<Option<usize>> {
+    use melee_ft::fighter::capture_kirby::{self, CaptorRequest};
+    let Some(request) = with_fighter!(&mut state.fighters[player], |f| f
+        .combat
+        .mouth_request
+        .take())
+    else {
+        return Ok(None);
+    };
+    let other = held_victim(state, player).expect("a mouth request without a victim");
+    let (captor, victim) = pair(&mut state.fighters, player, other);
+    let (va, ca) = (&state.assets.fighters[other], &state.assets.fighters[player]);
+    with_fighter!(captor, |c| with_fighter!(victim, |v| match request {
+        CaptorRequest::Close => capture_kirby::close(v, c, va, ca),
+        CaptorRequest::Spit(star) => capture_kirby::spit(v, c, va, ca, &mut state.map, star),
+        CaptorRequest::Swallow(star) => capture_kirby::swallow(v, c, va, ca, &mut state.map, star),
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(Some(other))
+}
+
+/// ftCo_CaptureWaitKirby_IASA on the pair: the held fighter's stick moves
+/// its captor, and its spent hold timer frees both. Returns the captor's
+/// index with what changed motion.
+pub(super) fn mouth_hold(
+    state: &mut InitialState,
+    player: usize,
+) -> Result<Option<(usize, melee_ft::fighter::capture_kirby::HoldChanges)>> {
+    use melee_ft::fighter::capture_kirby;
+    if !with_fighter!(&mut state.fighters[player], |f| capture_kirby::take_input(
+        &mut f.core
+    )) {
+        return Ok(None);
+    }
+    let other = captor_of(state, player).expect("a held fighter's captor");
+    let (victim, captor) = pair(&mut state.fighters, player, other);
+    let (va, ca) = (&state.assets.fighters[player], &state.assets.fighters[other]);
+    let changes = with_fighter!(captor, |c| with_fighter!(victim, |v| {
+        capture_kirby::hold_input(v, c, va, ca, &mut state.map)
+    }))
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(Some((other, changes)))
+}

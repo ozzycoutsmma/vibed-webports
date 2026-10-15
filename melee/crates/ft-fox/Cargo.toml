@@ -1,0 +1,17 @@
+[package]
+name = "ft-fox"
+description = "Fighter: Fox (decomp src/melee/ft/kinds/ftFox). One crate per character so fighters build in parallel and independently"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+melee-it = { path = "../melee-it" }
+ft-fox-family = { path = "../ft-fox-family" }
+melee-types = { path = "../melee-types" }
+melee-ft = { path = "../melee-ft" }
+gekko-math = { path = "../gekko-math" }
+hsd-types = { path = "../hsd-types" }
+hsd-archive = { path = "../hsd-archive" }
+
+[dev-dependencies]
+melee-test-support = { path = "../melee-test-support" }

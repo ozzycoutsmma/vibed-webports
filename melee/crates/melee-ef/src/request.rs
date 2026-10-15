@@ -1,0 +1,584 @@
+//! efAsync/efSync caller requests and outgoing-pose flush storage.
+use hsd_types::{Mtx, Vec3};
+use melee_types::fixed::FixedVec;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EffectRequest {
+    /// efAsync kind 2 / 0x41D: owned model 0xF at a fixed world origin.
+    WallJump {
+        position: Vec3,
+    },
+    /// S3: parameters consumed by an owned model's post-animation update callback.
+    OwnedRotation {
+        model: u32,
+        rotation: Vec3,
+    },
+    /// The owner's state an owned model's post-animation callback reads
+    /// for its root Z rotation (efLib_Cb_ftMr_SpecialLw's floor tilt).
+    OwnedRotationZ {
+        model: u32,
+        rotation: f32,
+    },
+    /// The owner turned round: an owned model whose update callback turns
+    /// its root to the owner's facing (efLib_Cb_SetRotYAndTransition reads
+    /// the fighter's facing on every update) takes the new one.
+    OwnedFacing {
+        model: u32,
+        facing: f32,
+    },
+    /// efLib_SetFlags(gobj, 1) (eflib.c:189): every effect the fighter owns
+    /// is marked to expire; an update callback that reads the flag ends
+    /// its model (Final Cutter's blade).
+    ExpireOwned,
+    // S6: ftColl_80076CBC, efSync_Spawn(27) at the physical powershield contact.
+    PowershieldSpark {
+        position: Vec3,
+    },
+    /// S6: efAsync kind 0 / effect 1051, shield-joint translation and local scale.
+    ShieldBreak {
+        bone: usize,
+        scale: f32,
+    },
+    /// S6: efAsync 0x429, attached generator 0xCE and its shared AppSRT.
+    /// 0x428 and 0x42A are the same call with generators 0xCA and 0xCF
+    /// (efasync.c:589-597, efLib_CreateGenerator_AppSRT_SetScale).
+    DizzyStars {
+        generator: u32,
+        bone: usize,
+        scale: f32,
+    },
+    // S3: synchronous efAlt generator with a live fighter joint.
+    SyncAttached {
+        id: u16,
+        bone: usize,
+    },
+    /// efSync_Spawn(id, gobj, jobj, jobj): a synchronous pair of attached
+    /// models, one per fighter joint (efAlt 0x48F, Falcon Punch).
+    SyncAttachedPair {
+        id: u16,
+        bones: [usize; 2],
+    },
+    /// ftColl_80078538: severity-dependent draw after the primary hit spark.
+    /// ftYs_Init_8012BE3C, efSync_Spawn 0x4CF: positional shell burst.
+    EggShell {
+        bone: usize,
+        scale: f32,
+        /// efSync_Spawn from inside a fighter callback (the Egg Roll's
+        /// take-damage hook), where efAsync_Spawn would queue: retail has
+        /// drawn the fragments before the callback returns.
+        immediate: bool,
+        /// The random stream's position where retail created an immediate
+        /// burst, when the requester draws again before the port resolves
+        /// the request (`EffectQueue::reserve_creation_draws`).
+        seed: Option<u32>,
+    },
+    /// Effect 1030 (0x406): a bounce off a surface at a fixed world point,
+    /// rotated to the surface's normal (Fire Fox, tumble bounces).
+    SurfaceRebound {
+        position: Vec3,
+        angle: f32,
+    },
+    /// efSync_Spawn(id, gobj, &pos) -> efLib_Create_Attach_Pos: a
+    /// character model the fighter owns at a fixed world point (0x4D2,
+    /// Peach's vegetable pull).
+    PositionalModel {
+        id: u16,
+        position: Vec3,
+    },
+    /// efSync_Spawn(id, gobj, &pos) for an efAsync generator row: the
+    /// efLib_CreateGenerator at a world point (1012, Quick Attack's trail).
+    PositionalGenerator {
+        id: u16,
+        position: Vec3,
+    },
+    /// efSync_Spawn(id, gobj, &pos, &facing, &angle) for a Graphics model
+    /// row (0x3FF: Yoshi's rolling dust): a fixed world point, turned to the
+    /// facing (efAsync_SetEffectFacingDir) and rotated about Z.
+    PositionalGraphics {
+        id: u16,
+        position: Vec3,
+        facing: f32,
+        angle: f32,
+    },
+    DamageTrail {
+        trajectory: f32,
+    },
+    /// efSync_Spawn 0x42B: the explosion at the blast-zone exit, rotated by the exit angle.
+    /// Camera_RequestQuake(kind, &pos) called by the fighter itself, ahead
+    /// of an effect it then spawns (a KO: ft_0D31.c:220): the screen-shake
+    /// model's GObj is created before that effect's.
+    CameraQuake {
+        /// CmQuakeKind.
+        kind: u16,
+        position: Vec3,
+    },
+    Death {
+        position: Vec3,
+        angle: f32,
+        scale: f32,
+    },
+    /// fn_800DA1D8: async kind 1, hold-bone position sampled at queue flush.
+    CaptureFlash {
+        bone: usize,
+    },
+    /// efAsync kind 1 for a character model row: at the queue flush,
+    /// efSync_Spawn(id, gobj, &pos) -> efLib_Create_Attach_Pos at the
+    /// bone's world position (0x4CC, Donkey Kong's Hand Slap).
+    BoneModel {
+        id: u16,
+        bone: usize,
+    },
+    /// efSync_Spawn: shield model attached to the shield joint.
+    Shield {
+        id: u16,
+        bone: usize,
+    },
+    /// ftColl_8007A06C -> efSync_Spawn: world-space contact effect.
+    /// efSync_Spawn 1052: hitbox-pair clank midpoint.
+    Clank {
+        position: Vec3,
+    },
+    ShieldSpark {
+        position: Vec3,
+    },
+    NormalSparkExtra {
+        position: Vec3,
+        facing: f32,
+        variant: i32,
+        random_bound: i32,
+    },
+    HitSpark {
+        position: Vec3,
+        element: melee_types::HitElement,
+        damage: f32,
+        large: bool,
+    },
+    /// ftCommon_8007DB24 -> efLib_DestroyAll: remove this fighter's owned effects.
+    DestroyOwned,
+    /// Item_8026A8EC on the fighter's own article from inside the fighter's
+    /// proc (the grapple beam, it_802B7B84): efLib_DestroyAll(item) walks
+    /// the article's JObj tree with hsd_8039D688 there and then, which parks
+    /// the generator insertion cursor at the list's tail for whatever the
+    /// fighter spawns next in the same proc.
+    ArticleDestroyed,
+    /// Item_8026A8EC has run on every article this proc removed so far (a
+    /// death's callbacks and held item, ftCo_800D331C; a hit's take-damage
+    /// callback, ftCommon_8007DB58): their GObjs, and their models', were
+    /// freed before whatever the fighter's queue holds next. The scene
+    /// frees them after the proc, so the flush marks the allocator here
+    /// (`hsd_gobj::GObjAddresses::mark`).
+    ArticlesFreed,
+    /// efSync_Spawn(0x43F, NULL, &pos, &scale) (efasync.c:758-771): the puff
+    /// a second fighter (Nana) vanishes in when its leader's death ends
+    /// (ftCo_800D4F24): common generator 0xCA whose AppSRT carries the point
+    /// and a uniform scale. No fighter owns it.
+    PartnerVanish {
+        position: Vec3,
+        scale: f32,
+    },
+    /// ftCliffCommon_80081370: async kind 2 with no bone, absolute position.
+    LedgeGrab {
+        position: Vec3,
+    },
+    /// efAsync kind 0 passes the live fighter joint without offset RNG.
+    Attached {
+        id: u16,
+        bone: usize,
+    },
+    /// efAsync kind 3 (EF_SPAWN_ATTACH_PARAM): at the flush, efSync_Spawn
+    /// on the live joint with one float parameter (efAlt 0x490, Falcon Kick).
+    AttachedParameter {
+        id: u16,
+        bone: usize,
+        parameter: f32,
+    },
+    /// efAsync kind 3, efAsync_Dispatch 0x415 (efasync.c:393-402): the ice
+    /// block around a frozen fighter, efLib_Create_AttachChild(0x25) on the
+    /// live joint with the ASYNC state bit and a uniform scale.
+    IceBlock {
+        bone: usize,
+        scale: f32,
+    },
+    /// efAsync kind 5, efAsync_Dispatch 0x443 (efasync.c:786-799): the ice
+    /// shattering, generator 0x1F1 whose AppSRT carries the joint's world
+    /// position at the flush and a uniform scale.
+    IceShatter {
+        bone: usize,
+        scale: f32,
+    },
+    /// efAsync kind 5 with no joint, 0x406: [`Self::SurfaceRebound`] queued
+    /// for the fighter's flush (a frozen block bouncing off a wall).
+    QueuedRebound {
+        position: Vec3,
+        angle: f32,
+    },
+    /// efAsync kind 7 (EF_SPAWN_ATTACH_OFFSET), efAsync_Dispatch 0x446:
+    /// efLib_CreateGenerator_AppSRT_SetPos. An empty model follows the bone
+    /// at a world-axis offset and carries one AppSRT generator.
+    FollowingGenerator {
+        id: u16,
+        bone: usize,
+        offset: Vec3,
+    },
+    /// efAsync kinds 2/5/6 retain the bone and local offset until s_link 9.
+    Graphics {
+        id: u16,
+        bone: usize,
+        offset: Vec3,
+        facing: f32,
+        floor_angle: f32,
+    },
+    /// efAsync_Spawn(..., 3, 0x43E, root, scale), ft_0C31.c:130: `scale` is
+    /// the one float kind 3 queues (efasync.c:1427, retail 0x800677F0), the
+    /// x of the fighter root's scale before the entry.
+    EntryWarp {
+        id: u16,
+        scale: f32,
+    },
+    /// ftAction_80072E4C / ftCo_8009F834: root-relative landing dust; also the star-KO
+    /// twinkle (efAsync_Spawn 0x42D at cur_pos, ftCo_DeadUpStar_Anim).
+    Landing {
+        id: u16,
+        offset: Vec3,
+        floor_angle: f32,
+    },
+}
+
+/// Port capacity per fighter/proc boundary. efAsync_QueueInit (80067980)
+/// uses HSD_ObjAlloc without a numeric retail cap; overflow fails explicitly.
+pub const REQUEST_CAPACITY: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct QueuedEffect {
+    pub request: EffectRequest,
+    pub matrix: Option<Mtx>,
+    /// Graphics commands retail queued before this request that the port
+    /// has not resolved yet; they are inserted ahead of it.
+    graphics_ahead: u8,
+}
+impl QueuedEffect {
+    fn immediate(&self) -> bool {
+        self.matrix.is_some() || self.request.is_immediate()
+    }
+}
+
+/// A flat queue retains sealed flushes in dispatch order, avoiding recursive
+/// heap-owned batches. Deferred entries alone are reversed at their flush.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EffectQueue {
+    entries: FixedVec<QueuedEffect, REQUEST_CAPACITY>,
+    /// Where the last motion change's flush put what it sealed
+    /// (`resolve_pending`): `entries[seal_start..seal_end]`, empty when
+    /// nothing was pending. Graphics commands that flush took join it
+    /// (`push_sealed_graphics`).
+    seal_start: u8,
+    seal_end: u8,
+}
+impl EffectQueue {
+    pub fn push(&mut self, request: EffectRequest) {
+        assert!(
+            self.entries.len() < REQUEST_CAPACITY,
+            "effect storage capacity {REQUEST_CAPACITY} exhausted"
+        );
+        let index = self
+            .entries
+            .iter()
+            .position(|e| e.graphics_ahead > 0)
+            .unwrap_or(self.entries.len());
+        self.entries.insert(
+            index,
+            QueuedEffect {
+                request,
+                matrix: None,
+                graphics_ahead: 0,
+            },
+        );
+        if index <= usize::from(self.seal_start) {
+            self.seal_start += 1;
+            self.seal_end += 1;
+        } else if index < usize::from(self.seal_end) {
+            self.seal_end += 1;
+        }
+    }
+    /// A request an entry callback pushes after its motion change ran the new
+    /// script's frame-0 commands and a color program step. efAsync_Spawn
+    /// (800679B0) queues in call order, but the port resolves those
+    /// `pending_graphics` commands later, at the proc's RNG boundary: they are
+    /// inserted ahead of this request, while graphics issued after it (the
+    /// proc's own color step, ftCo_800C0408) stay behind it.
+    pub fn push_after_graphics(&mut self, request: EffectRequest, pending_graphics: usize) {
+        assert!(
+            self.entries.len() < REQUEST_CAPACITY,
+            "effect storage capacity {REQUEST_CAPACITY} exhausted"
+        );
+        self.entries.push(QueuedEffect {
+            request,
+            matrix: None,
+            graphics_ahead: u8::try_from(pending_graphics).expect("pending graphics count"),
+        });
+    }
+    /// One resolved graphics command, in issue order: it goes ahead of the
+    /// requests pushed after it was issued.
+    pub fn push_graphics(&mut self, request: EffectRequest) {
+        self.push(request);
+        self.skip_graphics();
+    }
+    /// One resolved graphics command that a motion change's efAsync flush
+    /// took (Fighter_ChangeMotionState, fighter.c:951): it was queued when
+    /// its command ran, so that flush created it after the requests of its
+    /// batch queued later (those still counting it ahead) and before the
+    /// batch's earlier ones.
+    pub fn push_sealed_graphics(
+        &mut self,
+        request: EffectRequest,
+        matrix: impl FnOnce(Option<usize>) -> Mtx,
+    ) {
+        assert!(
+            self.entries.len() < REQUEST_CAPACITY,
+            "effect storage capacity {REQUEST_CAPACITY} exhausted"
+        );
+        let (start, end) = (
+            usize::from(self.seal_start).min(self.entries.len()),
+            usize::from(self.seal_end).min(self.entries.len()),
+        );
+        let index = self
+            .entries
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(start)
+            .filter(|(_, e)| e.matrix.is_some() && e.graphics_ahead > 0)
+            .map(|(later, _)| later + 1)
+            .last()
+            .unwrap_or(start);
+        self.seal_start = start as u8;
+        self.seal_end = end as u8 + 1;
+        let matrix = Some(matrix(request.bone()));
+        self.entries.insert(
+            index,
+            QueuedEffect {
+                request,
+                matrix,
+                graphics_ahead: 0,
+            },
+        );
+        self.skip_graphics();
+    }
+    /// A graphics command that resolved to no request (an invisible fighter's).
+    pub fn skip_graphics(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.graphics_ahead = entry.graphics_ahead.saturating_sub(1);
+        }
+    }
+    pub fn finish_graphics(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.graphics_ahead = 0;
+        }
+    }
+    pub fn pop(&mut self) -> Option<EffectRequest> {
+        self.entries.pop().map(|e| e.request)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    /// Take the draws a queued efSync_Spawn makes as it creates its models
+    /// out of the stream now. Retail spawns it inside the fighter's
+    /// callback; the port resolves the request after the proc, so a caller
+    /// that draws after such a callback (the damage reaction's roll after
+    /// the take-damage hook) reserves them where retail made them, and the
+    /// spawn replays them from the saved position.
+    pub fn reserve_creation_draws(&mut self, rng: &mut gekko_math::HsdRng) {
+        for entry in self.entries.iter_mut() {
+            if let EffectRequest::EggShell {
+                immediate: true,
+                seed,
+                ..
+            } = &mut entry.request
+            {
+                if seed.is_none() {
+                    *seed = Some(rng.seed);
+                    for _ in 0..crate::egg_shell::CREATION_DRAWS {
+                        rng.rand();
+                    }
+                }
+            }
+        }
+    }
+    pub fn clear(&mut self) {
+        while self.entries.pop().is_some() {}
+    }
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &EffectRequest> {
+        self.entries.iter().map(|e| &e.request)
+    }
+    /// efAsync_QueueFlush (80067624): newest pending request first, using
+    /// transforms sampled before the caller replaces its animation resources.
+    /// Returns how many requests it sealed.
+    pub fn resolve_pending(&mut self, mut matrix: impl FnMut(Option<usize>) -> Mtx) -> usize {
+        let mut pending = FixedVec::<_, REQUEST_CAPACITY>::default();
+        let mut old = std::mem::take(&mut self.entries);
+        while !old.is_empty() {
+            let entry = old.remove(0);
+            if entry.immediate() {
+                self.entries.push(entry);
+            } else {
+                pending.push(entry);
+            }
+        }
+        let sealed = pending.len();
+        self.seal_start = self.entries.len() as u8;
+        while let Some(mut entry) = pending.pop() {
+            entry.matrix = Some(matrix(entry.request.bone()));
+            self.entries.push(entry);
+        }
+        self.seal_end = self.entries.len() as u8;
+        sealed
+    }
+    pub(crate) fn drain(
+        &mut self,
+        timing: crate::EffectTiming,
+    ) -> FixedVec<QueuedEffect, REQUEST_CAPACITY> {
+        let mut drained = FixedVec::default();
+        match timing {
+            crate::EffectTiming::BeforeGraphics => {
+                let end = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        matches!(
+                            e.request,
+                            EffectRequest::DestroyOwned | EffectRequest::ArticleDestroyed
+                        )
+                    })
+                    .map(|(i, _)| i + 1)
+                    .last()
+                    .unwrap_or(0);
+                for _ in 0..end {
+                    let entry = self.entries.remove(0);
+                    assert!(entry.immediate(), "motion entry must seal outgoing effects");
+                    drained.push(entry);
+                }
+            }
+            crate::EffectTiming::SealedAfterTeardown => {
+                let last_sealed = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.matrix.is_some())
+                    .map(|(i, _)| i)
+                    .last();
+                let mut remaining = last_sealed.map_or(0, |last| last + 1);
+                let mut index = 0;
+                while remaining > 0 {
+                    let entry = self.entries.iter().nth(index).unwrap();
+                    let teardown = matches!(
+                        entry.request,
+                        EffectRequest::DestroyOwned
+                            | EffectRequest::ArticleDestroyed
+                            | EffectRequest::ArticlesFreed
+                    );
+                    if entry.matrix.is_some() || teardown {
+                        drained.push(self.entries.remove(index));
+                    } else {
+                        index += 1;
+                    }
+                    remaining -= 1;
+                }
+            }
+            crate::EffectTiming::Sealed => {
+                let mut index = 0;
+                while index < self.entries.len() {
+                    if self.entries.iter().nth(index).unwrap().matrix.is_some() {
+                        drained.push(self.entries.remove(index));
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            crate::EffectTiming::Immediate => {
+                let mut index = 0;
+                while index < self.entries.len() {
+                    if self.entries.iter().nth(index).unwrap().immediate() {
+                        drained.push(self.entries.remove(index));
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            crate::EffectTiming::Deferred => {
+                // Immediate effects are drained at every preceding proc. A sealed
+                // batch must reach that boundary before link 9 reverses pending work.
+                assert!(
+                    self.entries.iter().all(|e| !e.immediate()),
+                    "undrained immediate effects"
+                );
+                while let Some(entry) = self.entries.pop() {
+                    drained.push(entry);
+                }
+            }
+        }
+        drained
+    }
+}
+impl<const N: usize> PartialEq<[EffectRequest; N]> for EffectQueue {
+    fn eq(&self, other: &[EffectRequest; N]) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+impl EffectRequest {
+    fn is_immediate(&self) -> bool {
+        matches!(
+            self,
+            Self::OwnedRotation { .. }
+                | Self::OwnedRotationZ { .. }
+                | Self::OwnedFacing { .. }
+                | Self::ExpireOwned
+                | Self::PowershieldSpark { .. }
+                | Self::SyncAttached { .. }
+                | Self::SyncAttachedPair { .. }
+                | Self::SurfaceRebound { .. }
+                | Self::PositionalGraphics { .. }
+                | Self::PositionalGenerator { .. }
+                | Self::PositionalModel { .. }
+                | Self::CameraQuake { .. }
+                | Self::Death { .. }
+                | Self::Shield { .. }
+                | Self::HitSpark { .. }
+                | Self::NormalSparkExtra { .. }
+                | Self::ShieldSpark { .. }
+                | Self::Clank { .. }
+                | Self::DestroyOwned
+                | Self::ArticlesFreed
+                // Requested in a hit's proc, past link 9, where
+                // efAsync_Spawn (0x800679B0) dispatches at once.
+                | Self::IceBlock { .. }
+        )
+    }
+    fn bone(&self) -> Option<usize> {
+        match *self {
+            Self::DizzyStars { bone, .. }
+            | Self::ShieldBreak { bone, .. }
+            | Self::EggShell { bone, .. }
+            | Self::CaptureFlash { bone }
+            | Self::BoneModel { bone, .. }
+            | Self::Attached { bone, .. }
+            | Self::AttachedParameter { bone, .. }
+            | Self::IceBlock { bone, .. }
+            | Self::IceShatter { bone, .. }
+            | Self::SyncAttached { bone, .. }
+            | Self::FollowingGenerator { bone, .. }
+            | Self::Graphics { bone, .. } => Some(bone),
+            _ => None,
+        }
+    }
+}
+/// Scene-independent owner boundary. Implemented by the concrete fighter core;
+/// the effect engine needs neither character callbacks nor scene ownership.
+pub trait EffectOwner {
+    fn effect_queue(&mut self) -> &mut EffectQueue;
+    fn effect_matrix(&mut self, bone: Option<usize>) -> Mtx;
+    fn effect_facing(&self) -> f32;
+    fn effect_scale(&self) -> hsd_types::Vec3;
+}

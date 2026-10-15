@@ -1,0 +1,283 @@
+//! Fighter boundary adapter, promoted from melee-ft/tests/fighter_support.
+use super::{float, vector, word};
+use crate::assets::CharacterArchive;
+use hsd_types::Vec3;
+use melee_ft::fighter::{assets::FighterAssets, CharacterState};
+use melee_ft::{
+    collision::pose::GroundPoseFlags,
+    fighter::{Fighter, PlayerSlot},
+    input::{AnalogTimers, Buttons, FighterInput, InputFrame, Stick},
+};
+use melee_mp::CollMap;
+use melee_types::PlayerKind;
+/// Import only the saved boundary. No later row is used by this constructor.
+pub(crate) fn import(
+    archive: &CharacterArchive,
+    assets: &FighterAssets,
+    character: CharacterState,
+    map: &CollMap,
+    raw: &[u8],
+) -> Fighter {
+    let mut player = PlayerSlot {
+        id: raw[12],
+        secondary: raw[0x221F] & 0x08 != 0,
+        control: PlayerKind::Human,
+        costume: 0,
+        stocks: 1,
+        falls: 0,
+        position: Vec3::ZERO,
+        facing: 1.0,
+        scale: 1.0,
+        damage: 0.0,
+        cpu_mode: 4,
+        cpu_level: 1,
+    };
+    player.position = vector(raw, 0xB0);
+    player.facing = float(raw, 0x2C);
+    player.damage = float(raw, 0x1830);
+    player.costume = raw[0x619];
+    let (tree, root) = archive.model(player.costume);
+    let mut f = Fighter::prepare(player, character, assets, tree, root, map);
+    // prepare places the fighter at the Player position plus the kind's
+    // spawn offset (x40); the dump already holds the final position.
+    let position = vector(raw, 0xB0);
+    f.core.physics.position = position;
+    let root = f.core.animation.root;
+    f.core.skeleton.set_translate(root, &position);
+    f.spawn_number = word(raw, 0x8);
+    f.combat.capture_geometry = melee_ft::fighter::grab_throw::CaptureGeometry {
+        hip_scale: float(raw, 0x1A6C),
+        root_offset: vector(raw, 0x1A70),
+    };
+    let root = f.animation.root;
+    if word(raw, 0x14) == u32::MAX {
+        f.core.animation.clear_motion(&mut f.core.skeleton);
+    } else {
+        f.core
+            .animation
+            .set_animation(
+                &mut f.core.skeleton,
+                &assets.motions[&(word(raw, 0x14) as i32)],
+                float(raw, 0x894),
+                float(raw, 0x89C),
+            )
+            .unwrap();
+        f.animation.blend_progress = float(raw, 0x8A8) - 1.0;
+        f.core.animation.step_retail(&mut f.core.skeleton);
+        f.animation.blend_progress = float(raw, 0x8A8);
+        f.animation.remainder = float(raw, 0x898);
+    }
+    f.physics.self_velocity = vector(raw, 0x80);
+    f.physics.knockback_velocity = vector(raw, 0x8C);
+    f.physics.shield_knockback_velocity = vector(raw, 0x98);
+    f.physics.animation_velocity = vector(raw, 0x74);
+    f.physics.previous_position = vector(raw, 0xBC);
+    f.physics.position_delta = vector(raw, 0xC8);
+    f.physics.ground_velocity = float(raw, 0xEC);
+    f.physics.ground_acceleration = float(raw, 0xE4);
+    f.physics.secondary_ground_acceleration = float(raw, 0xE8);
+    f.physics.ground_knockback_velocity = float(raw, 0xF0);
+    f.physics.ground_shield_knockback_velocity = float(raw, 0xF4);
+    f.physics.jumps_used = raw[0x1968];
+    f.physics.fast_fall = raw[0x221A] & 8 != 0;
+    f.physics.ground_or_air = melee_types::GroundOrAir::try_from(word(raw, 0xE0) as i32).unwrap();
+    f.input = import_input(raw);
+    // dmg.x18C4 / x18C8: the KO credit (6: no source; -1: not counting).
+    f.combat.ko_source = melee_ft::fighter::ko_source::KoSource {
+        player: u8::try_from(word(raw, 0x18C4)).ok().filter(|&p| p != 6),
+        countdown: u32::try_from(word(raw, 0x18C8) as i32).ok(),
+    };
+    f.cpu.buttons = word(raw, 0x1A88);
+    f.cpu.stick = [raw[0x1A8C] as i8, raw[0x1A8D] as i8];
+    f.cpu.mode = word(raw, 0x1A94) as i32;
+    f.cpu.level = word(raw, 0x1A98) as i32;
+    f.cpu.behavior = word(raw, 0x1AA0) as i32;
+    f.cpu.reaction_timer = word(raw, 0x1B04) as i32;
+    f.cpu.attack_delay = word(raw, 0x1ABC) as i32;
+    f.status.input_frozen = raw[0x221D] & 8 != 0;
+    f.status.wall_jump.used = raw[0x1969];
+    f.status.wall_jump.contact_age = raw[0x210C];
+    f.status.wall_jump.side = float(raw, 0x2110);
+    f.status.in_hitstun = raw[0x221C] & 2 != 0;
+    f.commands.texture_animation_active = raw[0x221E] & 1 != 0;
+    f.status.shield_health = float(raw, 0x1998);
+    f.status.name_tag_timer = u16::from_be_bytes([raw[0x209A], raw[0x209B]]);
+    f.status.ledge_cooldown = word(raw, 0x2064) as i32;
+    f.status.ledge_intangibility = word(raw, 0x1990) as i32;
+    f.status.revival_invincibility = word(raw, 0x1994) as i32;
+    f.status.on_ledge = raw[0x221D] & 1 != 0;
+    f.status.grab_exclusions =
+        melee_ft::fighter::ledge::GrabExclusions(u16::from_be_bytes([raw[0x1A6A], raw[0x1A6B]]));
+    f.status.ledge_grab_disabled = raw[0x2228] & 0x20 != 0;
+    f.status.blast_zone_exempt = raw[0x2219] & 0x20 != 0;
+    f.status.ledge_timed_out = raw[0x2227] & 0x40 != 0;
+    f.thrown_hitbox.state = word(raw, 0x1064);
+    f.thrown_hitbox.offset = vector(raw, 0x1074);
+    f.thrown_hitbox.position = vector(raw, 0x10B0);
+    f.thrown_hitbox.previous_position = vector(raw, 0x10BC);
+    f.ground_pose =
+        GroundPoseFlags(((u16::from_be_bytes([raw[0x221C], raw[0x221D]]) >> 6) & 7) as u8);
+    f.dynamics_first_bone = (0..word(raw, 0x3E0) as usize)
+        .map(|i| word(raw, 0x2F0 + i * 0x18))
+        .collect();
+    restore_part_animations(&mut f.core, raw);
+    let archive_base = word(raw, 0x24) - assets.motion_table_offset;
+    let pc = word(raw, 0x3EC).wrapping_sub(archive_base);
+    f.commands.instruction = (word(raw, 0x3EC) != 0).then(|| {
+        assets
+            .instruction_offsets
+            .iter()
+            .position(|&p| p == pc)
+            .unwrap()
+    });
+    f.commands.timer = float(raw, 0x3E4);
+    f.commands.frame = float(raw, 0x3E8);
+    f.commands.variables = std::array::from_fn(|i| word(raw, 0x2200 + i * 4));
+    f.effect_state.destroy_on_state_change = raw[0x2219] & 0x80 != 0;
+    f.effect_state.rotating_bone_index = raw[0x2220] >> 5;
+    if f.commands.instruction.is_some() {
+        // lbcommand.c Command_03/05 share a stack: loop body + count,
+        // or one subroutine continuation. Recover the typed owners from
+        // the command preceding each saved address, never from trace history.
+        use melee_cmd::{Command, CommandLoop};
+        let depth = word(raw, 0x3F0) as usize;
+        assert!(depth <= 5, "CommandInfo stack capacity");
+        let mut slot = 0;
+        while slot < depth {
+            let address = word(raw, 0x3F4 + slot * 4).wrapping_sub(archive_base);
+            let instruction = assets
+                .instruction_offsets
+                .iter()
+                .position(|&p| p == address)
+                .expect("saved command stack instruction");
+            let loop_header = assets
+                .instruction_offsets
+                .iter()
+                .position(|&p| p == address.wrapping_sub(4));
+            if loop_header.is_some_and(|i| matches!(assets.commands[i], Command::BeginLoop(_))) {
+                assert!(slot + 1 < depth, "loop count missing");
+                f.commands.loops.push(CommandLoop {
+                    start: instruction,
+                    remaining: word(raw, 0x3F4 + (slot + 1) * 4),
+                });
+                slot += 2;
+            } else {
+                assert!(assets.commands.iter().any(|c| matches!(c, Command::Call { continuation, .. } if *continuation == instruction)), "saved subroutine continuation");
+                f.commands.return_stack.push(instruction);
+                slot += 1;
+            }
+        }
+    } // SM_None clears the script pointer; its old union bytes are inactive.
+    f.core.skeleton.set_rotation_y(
+        root,
+        (std::f64::consts::FRAC_PI_2 * f64::from(f.core.physics.facing)) as f32,
+    );
+    super::collision::restore(&mut f.collision, raw);
+    // The motion scratch words earlier states left (fp+0x2354, fp+0x2358).
+    f.core.scratch_tail_image = [word(raw, 0x2354), word(raw, 0x2358)];
+    if word(raw, 0x10) == 322 {
+        use hsd_types::Vec2;
+        use melee_ft::fighter::{entry::EntryState, MotionData};
+        f.install_motion_row(f.row(melee_types::CommonMotionState::Entry.into()));
+        let current_scale = vector(raw, 0x2354);
+        f.skeleton.set_scale(root, &current_scale);
+        f.state_data = MotionData::Entry(EntryState {
+            timer: word(raw, 0x2340) as i32,
+            origin_y: float(raw, 0x2344),
+            original_scale: vector(raw, 0x2348),
+            current_scale,
+            trophy_height: float(raw, 0x2360),
+            trophy_scale: float(raw, 0x2364),
+            lift: float(raw, 0x2368),
+            collision_box: melee_types::mp::FtCollisionBox {
+                top: float(raw, 0x236C),
+                bottom: float(raw, 0x2370),
+                left: Vec2::new(float(raw, 0x2374), float(raw, 0x2378)),
+                right: Vec2::new(float(raw, 0x237C), float(raw, 0x2380)),
+            },
+        });
+    }
+    if word(raw, 0x10) == melee_types::CommonMotionState::Sleep as u32 {
+        // A transformation partner (ftCo_800BFD04): hidden, every proc
+        // suppressed (x221F_b3, +221F mask 10); its camera subject comes
+        // back inactive with the others.
+        f.install_motion_row(f.row(melee_types::CommonMotionState::Sleep.into()));
+        f.core.effect_state.invisible = true;
+        f.core.status.disabled = raw[0x221F] & 0x10 != 0;
+    }
+
+    f
+}
+/// Restore the shared part-animation owner once, outside character imports.
+fn restore_part_animations(core: &mut melee_ft::fighter::FighterCore, raw: &[u8]) {
+    // Fighter.x8B0[5], stride 0x14 (ft/types.h:1301-1308).
+    // ftAnim_800707B0 ignores a slot only when current is -1. Preserve
+    // even inactive scalar words rather than infer defaults from a pose.
+    for (index, state) in core.animation.part_animations.iter_mut().enumerate() {
+        let offset = 0x8B0 + index * 0x14;
+        state.state = word(raw, offset) as i32;
+        state.duration = float(raw, offset + 4);
+        state.progress = float(raw, offset + 8);
+        state.rate = float(raw, offset + 12);
+        state.previous = raw[offset + 16] as i8;
+        state.current = raw[offset + 17] as i8;
+        // Filled in place: the fixed-capacity joint list is large to move.
+        state.joints.clear();
+        if let Some(set) = &core.bones.animation_sets[index] {
+            for &joint in &set.joints {
+                state.joints.push(usize::from(joint));
+            }
+        }
+    }
+}
+fn import_input(raw: &[u8]) -> FighterInput {
+    let frame = |i: usize| InputFrame {
+        stick: Stick {
+            x: float(raw, 0x620 + i * 8),
+            y: float(raw, 0x624 + i * 8),
+        },
+        cstick: Stick {
+            x: float(raw, 0x638 + i * 8),
+            y: float(raw, 0x63C + i * 8),
+        },
+        trigger: float(raw, 0x650 + i * 4),
+        held: Buttons(word(raw, 0x65C + i * 4)),
+    };
+    let analog = |i: usize| AnalogTimers {
+        tilt: raw[0x670 + i],
+        held: raw[0x673 + i],
+        since_crossing: raw[0x676 + i],
+        activity: raw[0x679 + i],
+    };
+    let mut input = FighterInput {
+        current: frame(0),
+        previous: frame(1),
+        saved: frame(2),
+        pressed: Buttons(word(raw, 0x668)),
+        released: Buttons(word(raw, 0x66C)),
+        horizontal: analog(0),
+        vertical: analog(1),
+        shoulder: analog(2),
+        use_current_history: raw[0x221D] & 0x10 != 0,
+        last_horizontal_positive: raw[0x2228] & 1 != 0,
+        last_vertical_negative: raw[0x2229] & 0x80 != 0,
+        ..FighterInput::default()
+    };
+    input.buttons.attack = raw[0x67C];
+    input.buttons.special = raw[0x67D];
+    input.buttons.jump_button = raw[0x67E];
+    input.buttons.shield = raw[0x67F];
+    input.buttons.digital_shield = raw[0x680];
+    input.buttons.taunt = raw[0x681];
+    input.buttons.down = raw[0x682];
+    input.buttons.previous_attack = raw[0x683];
+    input.buttons.previous_digital_shield = raw[0x684];
+    input.buttons.jump = raw[0x685];
+    input.buttons.special_up = raw[0x686];
+    input.buttons.special_down = raw[0x687];
+    input.buttons.special_side = raw[0x688];
+    input.buttons.special_neutral = raw[0x689];
+    input.buttons.previous_jump = raw[0x68A];
+    input.buttons.previous_special_up = raw[0x68B];
+    input
+}

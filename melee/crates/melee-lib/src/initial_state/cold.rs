@@ -1,0 +1,551 @@
+//! Versus setup from scene parameters and the pre-music boundary seed.
+//! Captures are comparison inputs in cold_tests.rs only.
+use super::InitialState;
+use crate::{assets::Assets, scene_fighter::SceneFighter, scene_stage::SceneStage, setup::Setup};
+use anyhow::{ensure, Context, Result};
+use gekko_math::HsdRng;
+use hsd_anim::load::load_joint_tree;
+use hsd_particle::{
+    rng_sites::DrawLog,
+    system::{ParticleSystem, SpawnRequest},
+};
+use hsd_types::Vec3;
+use melee_ft::fighter::{PlayerSlot, RetailTrig, SpawnContext, SpawnCounter};
+use melee_gr::{
+    battle::Battlefield,
+    last::{animation::BackgroundAnimation, FinalDestination},
+};
+use melee_types::{GrKind, PlayerKind};
+use std::collections::BTreeMap;
+
+/// ftCo_800A101C and ftCo_800B9704, including human slots and a
+/// player's partner fighter (Nana).
+const CPU_SETUP_DRAWS_PER_FIGHTER: usize = 2;
+/// fn_8016D8AC increments Player's Entry delay by five per entering slot.
+const ENTRY_STAGGER_FRAMES: i32 = 5;
+
+impl InitialState {
+    /// fn_8016E730 (gm_16AE.c): Ground creation, Player/Fighter creation,
+    /// then the pre-music boundary. Only owned DAT resources are read.
+    pub fn from_parameters(source: &dyn crate::diagnostics::ScenarioSource) -> Result<Self> {
+        let assets = Self::load_assets(source)?;
+        Self::from_parameters_with_assets(source, assets)
+    }
+    /// The archives a cold setup reads. They depend on the characters and
+    /// the stage alone, so setups that differ in anything else (seed,
+    /// costumes, codes) can share them.
+    pub fn load_assets(
+        source: &dyn crate::diagnostics::ScenarioSource,
+    ) -> Result<std::sync::Arc<Assets>> {
+        let setup = source.setup()?;
+        Ok(std::sync::Arc::new(Assets::load(
+            &source.assets_path(),
+            &setup.roster_descriptors(),
+            setup.stage_descriptor(),
+        )?))
+    }
+    /// [`Self::from_parameters`] with archives already read
+    /// ([`Self::load_assets`] of a setup with the same characters and stage).
+    pub fn from_parameters_with_assets(
+        source: &dyn crate::diagnostics::ScenarioSource,
+        assets: std::sync::Arc<Assets>,
+    ) -> Result<Self> {
+        ensure!(
+            source.is_cold(),
+            "cold construction requires savestate omitted"
+        );
+        let setup = source.setup()?;
+        let mut state = Self::from_assets(&setup, assets)?;
+        if source.has_boundary_recording() {
+            state.carry_stale_heap(&setup, source)?;
+        }
+        Ok(state)
+    }
+    /// HSD_ObjAlloc (0x8037ABC8) returns a Fighter block uncleared and
+    /// Fighter_Create (0x80068E98) writes only part of it, so some character
+    /// variables start as whatever the heap held. No scene parameter decides
+    /// them: take them from the boundary's retail recording, whose first
+    /// record is each Fighter as created (fighter-list order).
+    fn carry_stale_heap(
+        &mut self,
+        setup: &Setup,
+        source: &dyn crate::diagnostics::ScenarioSource,
+    ) -> Result<()> {
+        let boundary = super::first_json(source, &source.trace_path("tick.raw.jsonl"))?;
+        let rows = boundary["fighters"]
+            .as_array()
+            .context("missing fighters")?;
+        let roster = setup.roster();
+        ensure!(
+            rows.len() == roster.len() && rows.len() == self.fighters.len(),
+            "the boundary recording holds {} fighters, the scene {}",
+            rows.len(),
+            roster.len()
+        );
+        for ((row, entry), fighter) in rows.iter().zip(&roster).zip(&mut self.fighters) {
+            let hex = row["bytes"].as_str().context("missing fighter bytes")?;
+            ensure!(hex.len() == 0x23EC * 2, "invalid Fighter dump length");
+            let raw = hex
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|b| Ok(u8::from_str_radix(std::str::from_utf8(b)?, 16)?))
+                .collect::<Result<Vec<u8>>>()?;
+            ensure!(
+                super::word(&raw, 4) == i32::from(entry.descriptor.kind) as u32
+                    && raw[12] == setup.fighters[entry.player].slot,
+                "the boundary recording's fighters are not this scene's"
+            );
+            fighter.0.character.restore_stale_heap(&raw);
+            // The block's own address, which no parameter decides either.
+            let base = row["base"].as_str().context("missing fighter base")?;
+            fighter.0.cpu.fighter_address =
+                Some(u32::from_str_radix(base.trim_start_matches("0x"), 16)?);
+        }
+        Ok(())
+    }
+    pub(crate) fn from_assets(scenario: &Setup, assets: std::sync::Arc<Assets>) -> Result<Self> {
+        let mut map = melee_gr::desc::load_collision(&assets.stage, &assets.stage_desc)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // The supplied seed is after creation, before music. grLast's four
+        // draws (Battle/Story: one; Dream Land: two), then two CPU draws per slot.
+        // Invert this fixed, audited interval; never search an oracle at runtime.
+        let boundary_seed = scenario.seed.expect("validated cold seed");
+        let mut rng = HsdRng::new(before_setup(
+            boundary_seed,
+            setup_draws(
+                assets.stage_desc.kind,
+                scenario.roster().iter().map(|entry| entry.descriptor.kind),
+            )?,
+        ));
+        let mut particles = ParticleSystem::default();
+        let (mut stage, mut stage_animations) =
+            initialize_stage(&assets, &scenario.slippi, &mut rng, &mut particles, &mut map)?;
+        if let SceneStage::Stadium(stadium) = &mut stage {
+            if scenario.slippi.stadium_preload {
+                // Init isLoaded Bool.asm (0x801D14C8), in map 2's init.
+                stadium.transformation.preload = melee_gr::stadium::transform::Preload::Pending;
+            }
+            stadium.transformation.frozen = scenario.slippi.stadium_frozen;
+        }
+        stage.set_frozen_stages(scenario.slippi.frozen_stages);
+        // Fountain of Dreams binds its collision joints during creation.
+        let archive_bindings = !matches!(stage, SceneStage::Izumi(_));
+        if matches!(stage, SceneStage::Stadium(_)) {
+            crate::scene_stage::stadium::initialize_collision(&mut map, &mut stage_animations);
+        }
+        for (&id, animation) in stage_animations.iter_mut().filter(|_| archive_bindings) {
+            let bindings = &assets.stage_desc.models[id as usize].joint_mappings;
+            animation.update_collision(&mut map, bindings);
+            for binding in bindings {
+                map.joint_snapshot_prev_pos(i32::from(binding.joint_index));
+            }
+        }
+        let (mut fighters, spawn_counter) = create_players(scenario, &assets, &mut map, &mut rng)?;
+        for (index, fighter) in fighters.iter_mut().enumerate() {
+            fighter.0.cpu.fighter_address =
+                super::heap::fighter_address_after_boot(scenario, index);
+        }
+        // gm_16AE: Camera_80030730 (the stage's field of view, see
+        // StageCamera::fov), then Camera_8002F3AC snaps to the players.
+        let mut camera = melee_cm::GameCamera::new();
+        camera.screen = scenario.slippi.screen;
+        {
+            // cm_804D6468 runs newest first: the reverse of creation.
+            let subjects = fighters.iter_mut().rev().map(|f| &mut f.0.camera);
+            crate::frame::with_subjects(subjects, |subjects| {
+                camera.snap_standard(subjects, &assets.stage_camera)
+            });
+        }
+        let quakes =
+            crate::quake::Quakes::load(&assets.stage, assets.stage_desc.quake_model.as_ref())?;
+        ensure!(
+            rng.seed == boundary_seed,
+            "setup draw count differs from the boundary seed contract"
+        );
+        let pending_music = Some((
+            melee_gr::desc::read_music(&assets.stage, assets.stage_descriptor.music_id)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+            scenario
+                .all_characters_unlocked
+                .expect("validated cold music rule"),
+        ));
+        let mut effects = Box::new(melee_ef::Effects::from_resources(&assets.effect_resources));
+        effects.quake_models = quakes.has_models();
+        let rendered_camera = camera.render_camera(&assets.stage_camera);
+        Ok(Self {
+            items: Box::new(melee_it::ItemPool::new(assets.items.common.clone())),
+            article_poses: Box::new(crate::article_pose::ArticlePoses::new(
+                &assets.items.article_skeletons,
+            )),
+            stock_displays: super::stock::create(
+                &assets.interface,
+                std::array::from_fn(|player| scenario.fighters[player].stocks),
+                std::array::from_fn(|player| scenario.fighters[player].slot),
+            )?,
+            spawn_counter,
+            banner: Some(crate::banner::Banner::from_archive(
+                &assets.interface,
+                if scenario.sudden_death {
+                    crate::banner::BannerKind::SuddenDeathCountdown
+                } else {
+                    crate::banner::BannerKind::Countdown
+                },
+            )?),
+            stage_gobjs: Default::default(),
+            go_banner: Some(crate::banner::Banner::preload(
+                &assets.interface,
+                crate::banner::BannerKind::Go,
+            )?),
+            clock: crate::match_clock::MatchClock {
+                sudden_death: scenario.sudden_death,
+                timer: scenario
+                    .time_limit
+                    .map(crate::match_clock::CountdownTimer::start),
+                ..Default::default()
+            },
+            bomb_rain: Default::default(),
+            revival_offsets: Default::default(),
+            assets,
+            map,
+            stage,
+            particles,
+            stage_animations,
+            fighters,
+            rng,
+            pending_music,
+            selected_music: None,
+            resume: super::scheduler_resume::SchedulerResume::between_ticks(true),
+            // A cold match has no emission interrupted by a save boundary.
+            pending_emission: None,
+            effects,
+            camera,
+            rendered_camera,
+            quakes,
+            controller_fixes: scenario.controller_fixes()?,
+            pad_buffers: Default::default(),
+            dween_previous_x: [0.0; 4],
+            ko_counts: Default::default(),
+            offscreen_damage_by_camera_limits: scenario
+                .slippi
+                .offscreen_damage_by_camera_limits,
+        })
+    }
+}
+
+/// Inverse of the odd HSD LCG multiplier, modulo 2^32.
+/// The setup's fixed RNG interval: grLast's four draws (Battle/Story/
+/// Pokemon Stadium: one; Dream Land: two), then per fighter two CPU draws
+/// and what its kind's OnDeath draws (Kirby's Stone form).
+fn setup_draws(
+    stage: GrKind,
+    fighters: impl Iterator<Item = melee_types::FighterKind>,
+) -> Result<usize> {
+    let stage_draws = match stage {
+        GrKind::Last => 4,
+        GrKind::Battle | GrKind::Story | GrKind::PStadium => 1,
+        GrKind::OldPupupu => 2,
+        // grIzumi_801CC358's first step draws each platform's wait.
+        GrKind::Izumi => 2,
+        _ => anyhow::bail!(
+            "cold setup supports FD, Battlefield, Yoshi's Story, Dream Land, Fountain of Dreams \
+             and Pokemon Stadium"
+        ),
+    };
+    let fighter_draws: usize = fighters
+        .map(|kind| {
+            CPU_SETUP_DRAWS_PER_FIGHTER + crate::scene_fighter::SceneFighter::reset_draws_for(kind)
+        })
+        .sum();
+    Ok(stage_draws + fighter_draws)
+}
+
+/// A scene built after another one ends: the RNG carries over unchanged
+/// through the scenes between (the Sudden Death tie screen draws nothing),
+/// so the new scene's boundary seed is the old seed after its setup draws.
+pub(crate) fn boundary_seed_after(
+    seed: u32,
+    stage: GrKind,
+    fighters: impl Iterator<Item = melee_types::FighterKind>,
+) -> Result<u32> {
+    let mut rng = HsdRng::new(seed);
+    for _ in 0..setup_draws(stage, fighters)? {
+        rng.rand();
+    }
+    Ok(rng.seed)
+}
+
+fn before_setup(mut seed: u32, draws: usize) -> u32 {
+    const INVERSE_MULTIPLIER: u32 = 0xB9B3_3155;
+    for _ in 0..draws {
+        seed = seed
+            .wrapping_sub(HsdRng::INCREMENT)
+            .wrapping_mul(INVERSE_MULTIPLIER);
+    }
+    seed
+}
+
+/// Stage_80224E64 -> Ground_801C2D24: map-0 spawn marker under map scale.
+fn spawn_position(assets: &Assets, slot: i16) -> Result<Vec3> {
+    let binding = assets
+        .stage_desc
+        .position_bindings
+        .iter()
+        .find(|b| b.stage_position == slot)
+        .ok_or_else(|| anyhow::anyhow!("missing spawn marker {slot}"))?;
+    let (mut tree, root) = load_joint_tree(
+        &assets.stage,
+        &assets.stage_desc.models[binding.model_id].joint,
+    )?;
+    let wrapper = tree.alloc();
+    let scale = assets.stage_desc.parameters.map_scale;
+    tree.set_scale(wrapper, &Vec3::new(scale, scale, scale));
+    tree.add_child(wrapper, root);
+    let joint = tree
+        .bone(root, binding.joint_index as usize)
+        .expect("validated marker joint");
+    Ok(melee_ft::collision::ecb::world_position(&mut tree, joint))
+}
+
+/// Ground creation precedes every Fighter_Create call.
+fn initialize_stage(
+    assets: &Assets,
+    codes: &crate::slippi::SlippiCodes,
+    rng: &mut HsdRng,
+    particles: &mut ParticleSystem,
+    map: &mut melee_mp::CollMap,
+) -> Result<(SceneStage, BTreeMap<u8, BackgroundAnimation>)> {
+    let mut stage_animations = BTreeMap::new();
+    let stage = match assets.stage_desc.kind {
+        GrKind::Last => {
+            let mut stage = FinalDestination::initialize(&assets.stage_desc, rng);
+            stage.actions.clear();
+            stage_animations = crate::scene_stage::last::load_animations(assets)?;
+            SceneStage::FinalDestination(Box::new(stage))
+        }
+        GrKind::Battle => {
+            let mut stage = Battlefield::initialize(rng);
+            stage.lights = melee_gr::battle::lights::load(&assets.stage, &assets.stage_desc)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // grBattle_OnInit creates 0,3,1,6. Map 3 waits hidden without
+            // animation; grAnime_801C8138 immediately evaluates the others.
+            for id in [0, 1, 6] {
+                let mut animation = BackgroundAnimation::load_model(
+                    &assets.stage,
+                    &assets.stage_desc.models[id as usize],
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                animation.set_map_scale(assets.stage_desc.parameters.map_scale);
+                for event in animation.evaluate_initial_frame::<RetailTrig>() {
+                    let mut request = SpawnRequest::new(event.bank, event.kind, 0);
+                    request.joint = Some((super::stage::joint_id(id, event.joint), event.matrix));
+                    particles.spawn::<RetailTrig>(
+                        &assets.particle_bank,
+                        request,
+                        rng,
+                        &mut DrawLog::default(),
+                    )?;
+                }
+                stage_animations.insert(id, animation);
+            }
+            crate::scene_stage::battle::load_reserved(assets, &mut stage_animations)?;
+            SceneStage::Battlefield(stage)
+        }
+        GrKind::Story => {
+            let parameters = melee_gr::desc::read_story_parameters(&assets.stage)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut stage = melee_gr::story::Story::initialize(parameters, rng);
+            stage.lights =
+                melee_gr::battle::lights::load_model(&assets.stage, &assets.stage_desc, 3)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // grStory_801E3030: creation order 0,1,3,2. Maps 1/2 use
+            // grAnime_801C8138 (evaluate frame zero); map 3 only requests it.
+            for id in [0, 1, 3, 2] {
+                let model = &assets.stage_desc.models[id as usize];
+                let mut animation = BackgroundAnimation::load_model(&assets.stage, model)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if id == 3 {
+                    let subtree = melee_gr::desc::animation_subtree(&assets.stage, model, 1, 5)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    animation
+                        .attach_subtree(&assets.stage, 5, &subtree, model.animation_loops[1])
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+                animation.set_map_scale(assets.stage_desc.parameters.map_scale);
+                if matches!(id, 1 | 2) {
+                    ensure!(
+                        animation.evaluate_initial_frame::<RetailTrig>().is_empty(),
+                        "unexpected Story setup particle event"
+                    );
+                }
+                stage_animations.insert(id, animation);
+            }
+            SceneStage::Story(stage)
+        }
+        GrKind::OldPupupu => {
+            let parameters = melee_gr::desc::read_pupupu_parameters(&assets.stage)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut stage = melee_gr::pupupu::Pupupu::initialize(parameters, rng);
+            stage.lights =
+                melee_gr::battle::lights::load_model(&assets.stage, &assets.stage_desc, 5)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // The flyby model is created during the match
+            // (grOldPupupu_80210D10); only its animation's length is
+            // needed up front.
+            stage.flyby_frames = BackgroundAnimation::load_model(
+                &assets.stage,
+                &assets.stage_desc.models[2],
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .first_animation_end_frame()
+            .context("Dream Land flyby animation")? as i32;
+            for id in melee_gr::pupupu::procs::MAP_ORDER {
+                if id == 8 {
+                    continue;
+                }
+                let mut animation = BackgroundAnimation::load_model(
+                    &assets.stage,
+                    &assets.stage_desc.models[id as usize],
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                animation.set_map_scale(assets.stage_desc.parameters.map_scale);
+                if matches!(id, 0 | 3 | 7 | 4 | 1) {
+                    ensure!(
+                        animation.evaluate_initial_frame::<RetailTrig>().is_empty(),
+                        "unexpected Dream Land setup particle event"
+                    );
+                }
+                if id == 6 {
+                    animation.clear_animation();
+                }
+                stage_animations.insert(id, animation);
+            }
+            SceneStage::Pupupu(stage)
+        }
+        GrKind::Izumi => {
+            let (stage, animations) =
+                crate::scene_stage::izumi::initialize(assets, codes, rng, particles, map)?;
+            stage_animations = animations;
+            stage
+        }
+        GrKind::PStadium => {
+            let parameters = melee_gr::desc::read_stadium_parameters(&assets.stage)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let stage = melee_gr::stadium::Stadium::initialize(parameters, rng);
+            stage_animations = crate::scene_stage::stadium::load_models(assets)?;
+            SceneStage::Stadium(Box::new(stage))
+        }
+        _ => unreachable!(),
+    };
+    Ok((stage, stage_animations))
+}
+
+/// fn_8016E2BC: populate Player slots and create fighters in port order.
+/// player_standings_inline: PlayerInitData x12 = 300 for Sudden Death.
+const SUDDEN_DEATH_DAMAGE: f32 = 300.0;
+
+fn create_players(
+    scenario: &Setup,
+    assets: &Assets,
+    map: &mut melee_mp::CollMap,
+    rng: &mut HsdRng,
+) -> Result<(Vec<SceneFighter>, SpawnCounter)> {
+    let mut positions: Vec<_> = scenario
+        .fighters
+        .iter()
+        .map(|fighter| {
+            let marker = if fighter.spawn_point == -1 {
+                i16::from(fighter.slot)
+            } else {
+                i16::from(fighter.spawn_point)
+            };
+            spawn_position(assets, marker)
+        })
+        .collect::<Result<_>>()?;
+    // fn_8016DEEC: face the other player; nearby/equal-X markers
+    // resolve +1 for the first player, then -1 for the second.
+    let mut facing = if positions[1].x - positions[0].x < -5.0 {
+        [-1.0, 1.0]
+    } else {
+        [1.0, -1.0]
+    };
+    // fn_8016D8AC (0x8016DA3C): the delay grows by five for every Player slot
+    // up to this one, entering or not (ports 2 and 4 enter at 10 and 20).
+    let mut entry_delays: Vec<i32> = scenario
+        .fighters
+        .iter()
+        .map(|fighter| ENTRY_STAGGER_FRAMES * (i32::from(fighter.slot) + 1))
+        .collect();
+    if let crate::slippi::SpawnRule::NeutralTable(table) = scenario.slippi.spawn {
+        // Slippi's NeutralSpawn (0x8016E510) then overwrites each Player's
+        // initial coordinates and facing by spawn order (players ascend by
+        // slot); one version also overwrites the entry delay.
+        for (order, _) in scenario.fighters.iter().enumerate() {
+            let (position, face) =
+                crate::slippi::neutral_spawn(table, assets.stage_descriptor.music_id, order)
+                    .context("NeutralSpawn: no row for this stage")?;
+            positions[order] = position;
+            facing[order] = face;
+            if let Some(delay) = table.entry_delay(order) {
+                entry_delays[order] = delay;
+            }
+        }
+    }
+    let mut counter = SpawnCounter(1);
+    let mut fighters = Vec::new();
+    // Player_80031AD0 per slot: the player's fighter, then its partner, which
+    // reads the same Player position, facing and entry delay.
+    for (index, entry) in scenario.roster().into_iter().enumerate() {
+        let p = entry.player;
+        let player = PlayerSlot {
+            id: scenario.fighters[p].slot,
+            secondary: entry.secondary,
+            control: PlayerKind::Human,
+            costume: scenario.fighters[p].costume,
+            stocks: scenario.fighters[p].stocks,
+            falls: 0,
+            position: positions[p],
+            facing: facing[p],
+            scale: 1.0,
+            damage: if scenario.sudden_death {
+                SUDDEN_DEATH_DAMAGE
+            } else {
+                0.0
+            },
+            cpu_mode: 4,
+            cpu_level: 1,
+        };
+        let context = SpawnContext {
+            map: &mut *map,
+            stage_camera: &assets.stage_camera,
+            rng: &mut *rng,
+            counter: &mut counter,
+        };
+        let transformation_partner =
+            entry.secondary && crate::scene_fighter::transforms(entry.descriptor.kind);
+        if transformation_partner {
+            // A transforming character's other form sleeps (ftCo_800BFD04).
+            fighters.push(SceneFighter::partner_from_parameters(
+                &assets.characters[index],
+                &assets.fighters[index],
+                player,
+                context,
+            )?);
+            continue;
+        }
+        fighters.push(SceneFighter::from_parameters(
+            &assets.characters[index],
+            &assets.fighters[index],
+            player,
+            entry_delays[p],
+            context,
+        )?);
+        if entry.secondary {
+            // ftCo_800A101C's FTKIND_NANA loop reads the player's own
+            // fighter, created just before (ftCo_800A589C).
+            let own = &fighters[index - 1].0;
+            let (position, facing) = (own.physics.position, own.physics.facing);
+            fighters[index].0.cpu.seed_follow_ring(position, facing);
+        }
+    }
+    Ok((fighters, counter))
+}

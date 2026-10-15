@@ -1,0 +1,320 @@
+"""slippi_to_scenario.py: a replay's raw pads become tick-clock steps, and the
+boundary must be the replay's match."""
+from __future__ import annotations
+
+import json
+import tomllib
+
+import pytest
+
+import make_boundary as mb
+import replay_to_scenario as pads
+import slippi_to_scenario as s2s
+
+TABLE = json.loads(pads.CALIBRATION.read_text())
+
+
+def record(tick, slot, button=0, stick=(0, 0), cstick=(0, 0), triggers=(0, 0)):
+    return {"tick": tick, "slot": slot, "button": button, "stick": list(stick), "cstick": list(cstick),
+            "triggers": list(triggers)}
+
+
+def test_steps_hold_a_pad_until_it_changes_and_stop_at_the_tick_limit():
+    records = [record(1, 1), record(1, 3, button=0x100),
+               record(2, 1, stick=(94, -17)), record(2, 3, button=0x100),
+               record(3, 1, stick=(94, -17), triggers=(0, 140)), record(3, 3),
+               record(4, 1), record(4, 3)]
+    steps = s2s.steps(records, 4, TABLE)
+    assert [line.split(", buttons")[0].strip() for line in steps] == [
+        "{ frame = 1, port = 1", "{ frame = 1, port = 3", "{ frame = 2, port = 1", "{ frame = 3, port = 1",
+        "{ frame = 3, port = 3"]
+    # A raw beyond HSD's clamp circle is injected as recorded (UCF reads it).
+    assert "raw = { stickX = 94, stickY = -17 }" in steps[2]
+    assert "raw = { stickX = 94, stickY = -17, triggerR = 140 }" in steps[3]
+    assert "raw = { button = 256 }" in steps[1] and "A = true" in steps[1]
+    assert steps[4].endswith("buttons = {  }, raw = {  } },")
+
+
+def test_a_failed_poll_is_scheduled_as_one():
+    # The console's poll failed on tick 2 (PAD_ERR_TRANSFER): HSD kept tick
+    # 1's pad, and the queue entry UCF reads was zeroed. Tick 3 polls again.
+    records = [record(1, 1, button=0x100, stick=(61, 50)),
+               {**record(2, 1), "err": -3},
+               record(3, 1, button=0x100, stick=(61, 50))]
+    steps = s2s.steps(records, 4, TABLE)
+    assert len(steps) == 3
+    assert steps[1].endswith("buttons = {  }, raw = { err = -3 } },")
+    assert "raw = { button = 256, stickX = 61, stickY = 50 }" in steps[2]
+
+
+def test_a_recorded_start_press_is_not_fed_to_retail():
+    # Start held on a recorded frame: the console ran with Pause off.
+    records = [record(1, 1, button=0x1000), record(2, 1, button=0x1100), record(3, 1, button=0x100)]
+    steps = s2s.steps(records, 4, TABLE)
+    assert [line.split("raw = ")[1] for line in steps] == ["{  } },", "{ button = 256 } },"]
+    assert not any("Start" in line for line in steps)
+
+
+def test_the_boundary_must_be_the_replays_match():
+    header = {"stage": "Battlefield", "time_limit": 480,
+              "players": [{"slot": 1, "kind": "Marth", "costume": 1, "stocks": 4},
+                          {"slot": 3, "kind": "Peach", "costume": 1, "stocks": 4}]}
+    cold = {"stage": "Battlefield", "time_limit": 480,
+            "fighters": [{"slot": 1, "kind": "Marth", "costume": 1, "stocks": 4},
+                         {"slot": 3, "kind": "Peach", "costume": 1, "stocks": 4}]}
+    s2s.check_setup(header, cold, "b")
+    for change in ({"time_limit": 0}, {"stage": "FinalDestination"}):
+        with pytest.raises(SystemExit):
+            s2s.check_setup(header, {**cold, **change}, "b")
+    other_ports = [{**cold["fighters"][0], "slot": 0}, {**cold["fighters"][1], "slot": 1}]
+    with pytest.raises(SystemExit):
+        s2s.check_setup(header, {**cold, "fighters": other_ports}, "b")
+
+
+def write_boundary(scenarios, name, stage, codes, seed=7, game_start_seed=None, spawn_points=None):
+    """A make_boundary.py start scene and cold twin, as that command writes them."""
+    players, slots = ["Falco", "Marth"], [0, 3]
+    (scenarios / f"{name}.toml").write_text(
+        mb.start_scenario(name, stage, players, 4, codes, slots, game_start_seed))
+    (scenarios / f"{name}_cold.toml").write_text(
+        mb.cold_scenario(name, stage, players, 4, seed, [3, 4], "retail", codes, slots, 8, game_start_seed,
+                         spawn_points))
+
+
+def write_inputs(path, stage, spawn_points=None, **header):
+    players = [{"slot": 0, "kind": "Falco", "costume": 3, "stocks": 4, "controller_fix": "ucf-0.8"},
+               {"slot": 3, "kind": "Marth", "costume": 4, "stocks": 4, "controller_fix": "ucf-0.8"}]
+    for player, point in zip(players, spawn_points or []):
+        player["spawn_point"] = point
+    lines = [{"boundary_seed": 99, "all_characters_unlocked": True, "time_limit": 480, "stage": stage,
+              "ticks": 3, "players": players, **header},
+             record(1, 0, button=0x100), record(1, 3), record(2, 0), record(2, 3)]
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+@pytest.fixture
+def scenarios(tmp_path, monkeypatch):
+    monkeypatch.setattr(s2s.data_root, "SCENARIOS", tmp_path)
+    return tmp_path
+
+
+@pytest.mark.parametrize("codes,flags", [
+    (["ucf-0.8", "ps-preload"], {"stadium_preload": True}),
+    (["ucf-0.8", "ps-preload", "ps-frozen"], {"stadium_preload": True, "stadium_frozen": True}),
+    (["ucf-0.8"], {}),
+])
+def test_stadium_codes_reach_the_scenario_and_its_cold_twin(scenarios, codes, flags):
+    write_boundary(scenarios, "start_ps", "PokemonStadium", codes)
+    header = {"stadium_preload": False, "stadium_frozen": False, **flags}
+    write_inputs(scenarios / "inputs.jsonl", "PokemonStadium", **header)
+    # A Stadium that transforms keeps its creation draw (below).
+    foreign = [] if flags.get("stadium_frozen") else ["--foreign-creation"]
+    s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp_ps", "--boundary", "start_ps", *foreign])
+    retail = tomllib.loads((scenarios / "slp_ps.toml").read_text())
+    twin = tomllib.loads((scenarios / "slp_ps_cold.toml").read_text())
+    for scenario in (retail, twin):
+        assert {key: scenario[key] for key in scenario if key.startswith("stadium_")} == flags
+    assert retail["gecko"] == codes and "gecko" not in twin
+    assert (retail["boundary_seed"], twin["boundary_seed"], twin["seed"]) == (99, 99, 7)
+
+
+def test_a_boundary_without_the_replays_stadium_codes_is_refused(scenarios):
+    write_boundary(scenarios, "start_ps", "PokemonStadium", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "PokemonStadium", stadium_preload=True, stadium_frozen=False)
+    with pytest.raises(SystemExit, match="--gecko ps-preload"):
+        s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp_ps", "--boundary", "start_ps"])
+    assert not (scenarios / "slp_ps.toml").exists()
+    # A boundary with a code the console did not run is not its match either.
+    write_boundary(scenarios, "start_frozen", "PokemonStadium", ["ucf-0.8", "ps-preload", "ps-frozen"])
+    with pytest.raises(SystemExit, match="without --gecko ps-frozen"):
+        s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp_ps", "--boundary", "start_frozen"])
+
+
+@pytest.mark.parametrize("stage", s2s.CREATION_DRAW_STAGES)
+def test_a_stage_that_keeps_its_creation_draws_needs_the_replays_boundary(scenarios, stage):
+    inputs = scenarios / "inputs.jsonl"
+    write_inputs(inputs, stage, game_start_seed=41)   # boundary_seed 99
+    args = [str(inputs), "--name", "slp", "--boundary"]
+    # The boundary's own creation: refused, with the command that makes one.
+    write_boundary(scenarios, "start_own", stage, ["ucf-0.8"])
+    with pytest.raises(SystemExit, match="--game-start-seed 41"):
+        s2s.main([*args, "start_own"])
+    # Another replay's boundary.
+    write_boundary(scenarios, "start_other", stage, ["ucf-0.8"], seed=99, game_start_seed=40)
+    with pytest.raises(SystemExit, match="another replay's boundary"):
+        s2s.main([*args, "start_other"])
+    # The replay's seed, but retail did not reach the seed the port's setup draws do.
+    write_boundary(scenarios, "start_short", stage, ["ucf-0.8"], seed=98, game_start_seed=41)
+    with pytest.raises(SystemExit, match="retail reached seed 98"):
+        s2s.main([*args, "start_short", "--foreign-creation"])
+    assert not (scenarios / "slp.toml").exists()
+    # The replay's boundary: both scenarios name the Game Start seed.
+    write_boundary(scenarios, "start_replay", stage, ["ucf-0.8"], seed=99, game_start_seed=41)
+    s2s.main([*args, "start_replay"])
+    retail = tomllib.loads((scenarios / "slp.toml").read_text())
+    twin = tomllib.loads((scenarios / "slp_cold.toml").read_text())
+    assert retail["game_start_seed"] == twin["game_start_seed"] == 41
+    assert (retail["boundary_seed"], twin["boundary_seed"], twin["seed"]) == (99, 99, 99)
+    # A foreign boundary on request: retail plays the pads, not the replay's draws.
+    # The name is taken now: only --overwrite replaces a scenario.
+    with pytest.raises(SystemExit, match="already exist"):
+        s2s.main([*args, "start_own", "--foreign-creation"])
+    assert tomllib.loads((scenarios / "slp_cold.toml").read_text())["seed"] == 99
+    s2s.main([*args, "start_own", "--foreign-creation", "--overwrite"])
+    twin = tomllib.loads((scenarios / "slp_cold.toml").read_text())
+    assert "game_start_seed" not in twin and (twin["seed"], twin["boundary_seed"]) == (7, 99)
+    # A console renders after every tick; --dolphin-cadence leaves the key out.
+    assert tomllib.loads((scenarios / "slp.toml").read_text())["render_every_tick"] is True
+    s2s.main([*args, "start_own", "--foreign-creation", "--overwrite", "--dolphin-cadence"])
+    assert "render_every_tick" not in tomllib.loads((scenarios / "slp.toml").read_text())
+
+
+@pytest.mark.parametrize("flag", s2s.STADIUM_NEVER_TRANSFORMS)
+def test_a_stadium_that_never_transforms_takes_any_boundary_of_the_setup(scenarios, flag):
+    # The creation draw is the base form's first duration, which a frozen
+    # Stadium never reads.
+    codes = ["ucf-0.8", {"stadium_frozen": "ps-frozen", "frozen_stages": "frozen-stages"}[flag]]
+    write_boundary(scenarios, "start_ps", "PokemonStadium", codes)
+    write_inputs(scenarios / "inputs.jsonl", "PokemonStadium", game_start_seed=41, **{flag: True})
+    s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp", "--boundary", "start_ps"])
+    assert "game_start_seed" not in tomllib.loads((scenarios / "slp.toml").read_text())
+
+
+def test_a_replay_that_names_spawn_points_needs_a_boundary_made_with_them(scenarios):
+    inputs = scenarios / "inputs.jsonl"
+    write_inputs(inputs, "Battlefield", spawn_points=[0, 1])
+    args = [str(inputs), "--name", "slp", "--boundary"]
+    # The menus' boundary starts port 4 at marker 3.
+    write_boundary(scenarios, "start_menus", "Battlefield", ["ucf-0.8"])
+    with pytest.raises(SystemExit, match="--spawn-points 0 1"):
+        s2s.main([*args, "start_menus"])
+    write_boundary(scenarios, "start_points", "Battlefield", ["ucf-0.8"], spawn_points=[0, 1])
+    s2s.main([*args, "start_points"])
+    twin = tomllib.loads((scenarios / "slp_cold.toml").read_text())
+    assert [f["spawn_point"] for f in twin["fighters"]] == [0, 1]
+    # And a replay that names none is not a spawn-point boundary's match.
+    write_inputs(inputs, "Battlefield")
+    with pytest.raises(SystemExit, match="spawn at points"):
+        s2s.main([str(inputs), "--name", "slp2", "--boundary", "start_points"])
+
+
+def test_dream_land_takes_any_boundary_until_its_first_fly_by_can_draw(scenarios):
+    # grOldPupupu_80210C7C draws the first fly-by's delay at creation: 3000..4000 ticks.
+    write_boundary(scenarios, "start_dl", "DreamLand", ["ucf-0.8"])
+    inputs = scenarios / "inputs.jsonl"
+    write_inputs(inputs, "DreamLand", game_start_seed=41, ticks=9000)
+    args = [str(inputs), "--boundary", "start_dl", "--name"]
+    s2s.main([*args, "slp_short", "--ticks", "3000"])
+    assert "game_start_seed" not in tomllib.loads((scenarios / "slp_short.toml").read_text())
+    with pytest.raises(SystemExit, match="--game-start-seed 41"):
+        s2s.main([*args, "slp_long", "--ticks", "3001"])
+    with pytest.raises(SystemExit, match="--game-start-seed 41"):
+        s2s.main([*args, "slp_whole"])
+    assert not (scenarios / "slp_long.toml").exists() and not (scenarios / "slp_whole.toml").exists()
+
+
+def test_battlefield_takes_any_boundary_until_its_first_background_change_can_draw(scenarios):
+    # grBattle_BG_Callback0 (0x8021A344) draws the first delay at creation: 2400..3600 ticks.
+    write_boundary(scenarios, "start_bf", "Battlefield", ["ucf-0.8"])
+    inputs = scenarios / "inputs.jsonl"
+    write_inputs(inputs, "Battlefield", game_start_seed=41, ticks=9000)
+    args = [str(inputs), "--boundary", "start_bf", "--name"]
+    s2s.main([*args, "slp_short", "--ticks", "2400"])
+    assert "game_start_seed" not in tomllib.loads((scenarios / "slp_short.toml").read_text())
+    with pytest.raises(SystemExit, match="--game-start-seed 41"):
+        s2s.main([*args, "slp_long", "--ticks", "2401"])
+    with pytest.raises(SystemExit, match="--game-start-seed 41"):
+        s2s.main([*args, "slp_whole"])
+    assert not (scenarios / "slp_long.toml").exists() and not (scenarios / "slp_whole.toml").exists()
+
+
+def test_yoshis_story_takes_any_boundary_for_a_whole_replay(scenarios):
+    # Its creation draw is overwritten (the Shy Guy timer, 0x801E3304).
+    write_boundary(scenarios, "start_ys", "YoshisStory", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "YoshisStory", game_start_seed=41, ticks=9000)
+    s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp", "--boundary", "start_ys"])
+    assert "game_start_seed" not in tomllib.loads((scenarios / "slp.toml").read_text())
+
+
+def test_other_stages_take_any_boundary_of_the_setup(scenarios):
+    write_boundary(scenarios, "start_bf", "Battlefield", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "Battlefield", game_start_seed=41)
+    s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp", "--boundary", "start_bf"])
+    assert "game_start_seed" not in tomllib.loads((scenarios / "slp.toml").read_text())
+
+
+def test_a_lag_frame_names_the_record_with_no_display_pass_before_it(scenarios):
+    write_boundary(scenarios, "start_bf", "Battlefield", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "Battlefield", game_start_seed=41)
+    args = [str(scenarios / "inputs.jsonl"), "--boundary", "start_bf"]
+    s2s.main([*args, "--name", "slp_lag", "--no-display-pass-before", "9", "4"])
+    retail = tomllib.loads((scenarios / "slp_lag.toml").read_text())
+    assert retail["render_every_tick"] is True and retail["no_display_pass_before"] == [4, 9]
+    # The port follows the recording's display clock: its twin names nothing.
+    assert "no_display_pass_before" not in tomllib.loads((scenarios / "slp_lag_cold.toml").read_text())
+    # A lag frame is a dropped pass of the console's cadence, not of Dolphin's.
+    with pytest.raises(SystemExit, match="console's cadence"):
+        s2s.main([*args, "--name", "slp_lag2", "--no-display-pass-before", "4", "--dolphin-cadence"])
+
+
+def test_a_replay_whose_pads_end_early_bridges_only_that_far(scenarios, capsys):
+    write_boundary(scenarios, "start_ys", "YoshisStory", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "YoshisStory", pads_end="tick 3 port 1: no raw stick reads as ...")
+    args = [str(scenarios / "inputs.jsonl"), "--boundary", "start_ys"]
+    with pytest.raises(SystemExit, match="for 3 ticks only, not 9"):
+        s2s.main([*args, "--name", "slp_long", "--ticks", "9"])
+    s2s.main([*args, "--name", "slp_all"])
+    assert tomllib.loads((scenarios / "slp_all.toml").read_text())["frames"] == 3
+    assert "the scenario ends at tick 3" in capsys.readouterr().err
+    s2s.main([*args, "--name", "slp_short", "--ticks", "2"])
+    assert tomllib.loads((scenarios / "slp_short.toml").read_text())["frames"] == 2
+
+
+def test_the_map_proc_sample_is_asked_for_by_name(scenarios):
+    write_boundary(scenarios, "start_ys", "YoshisStory", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "YoshisStory")
+    args = [str(scenarios / "inputs.jsonl"), "--boundary", "start_ys"]
+    s2s.main([*args, "--name", "slp_sampled", "--after-map"])
+    assert tomllib.loads((scenarios / "slp_sampled.toml").read_text())["after_map"] is True
+    s2s.main([*args, "--name", "slp_plain"])
+    assert "after_map" not in tomllib.loads((scenarios / "slp_plain.toml").read_text())
+    assert "after_map" not in tomllib.loads((scenarios / "slp_sampled_cold.toml").read_text())
+
+
+def test_an_unconsumed_poll_names_its_record(scenarios):
+    write_boundary(scenarios, "start_ys", "YoshisStory", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "YoshisStory")
+    s2s.main([str(scenarios / "inputs.jsonl"), "--boundary", "start_ys", "--name", "slp_poll",
+              "--unconsumed-poll-before", "7023"])
+    assert tomllib.loads((scenarios / "slp_poll.toml").read_text())["unconsumed_poll_before"] == [7023]
+    assert "unconsumed_poll_before" not in tomllib.loads((scenarios / "slp_poll_cold.toml").read_text())
+def test_an_online_game_carries_its_rng_offset_and_code_to_both_scenarios(scenarios, capsys):
+    codes = ["ucf-0.8", "online-offscreen-damage"]
+    write_boundary(scenarios, "start_bf", "Battlefield", codes)
+    write_inputs(scenarios / "inputs.jsonl", "Battlefield", online_rng_offset=39851,
+                 online_offscreen_damage=True, rollback_loop_ticks=[0, 1, 5])
+    s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp_online", "--boundary", "start_bf"])
+    retail = tomllib.loads((scenarios / "slp_online.toml").read_text())
+    twin = tomllib.loads((scenarios / "slp_online_cold.toml").read_text())
+    for scenario in (retail, twin):
+        assert scenario["online_rng_offset"] == 39851
+        assert scenario["online_offscreen_damage"] is True
+    assert retail["gecko"] == codes
+    # Ticks 0 and 1 are records 1 and 2 of the three played; tick 5 is past them.
+    assert "2 of its ticks ran in a rollback's loop" in capsys.readouterr().err
+
+
+def test_a_boundary_without_the_online_code_is_refused_for_an_online_game(scenarios):
+    write_boundary(scenarios, "start_bf", "Battlefield", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "Battlefield", online_rng_offset=39851,
+                 online_offscreen_damage=True)
+    with pytest.raises(SystemExit, match="--gecko online-offscreen-damage"):
+        s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp_online", "--boundary", "start_bf"])
+
+
+def test_an_offline_game_has_no_online_keys(scenarios):
+    write_boundary(scenarios, "start_bf", "Battlefield", ["ucf-0.8"])
+    write_inputs(scenarios / "inputs.jsonl", "Battlefield")
+    s2s.main([str(scenarios / "inputs.jsonl"), "--name", "slp_bf", "--boundary", "start_bf"])
+    for name in ("slp_bf", "slp_bf_cold"):
+        assert "online" not in (scenarios / f"{name}.toml").read_text()

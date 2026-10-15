@@ -1,0 +1,242 @@
+//! efLib_Create/efLib_RemoveLast model storage, prepared from assets at load.
+use super::*;
+use std::sync::Arc;
+
+/// efLib_Create (8005BE88), eflib.c:442-447 caps async models at 64.
+pub const ASYNC_CAPACITY: usize = 64;
+/// Port bound for sync models. Retail excludes these from EffectCount and uses
+/// HSD_ObjAlloc without a numeric cap (eflib.c:442-464, efsync.c:84).
+const SYNC_CAPACITY: usize = 64;
+pub const INSTANCE_CAPACITY: usize = ASYNC_CAPACITY + SYNC_CAPACITY;
+// Either descriptor class can occupy all 64 slots in its own pool.
+const SLOTS_PER_MODEL: usize = 64;
+// Common descriptors reached by the supported efAsync/efSync dispatch rows.
+static MODEL_IDS: [u32; 28] = [
+    0, 0x14, 0x15, 1, 0x16, 0x17, 2, 3, 4, 5, 8, 9, 10, 0xB, 0xC, 0xD, 0xE, 0xF, 0x12, 0x13, 0x18,
+    0x19, 0x1E, 0x1F, 0x10, 0x11, 0x28, 0x25,
+];
+const WARP_MODEL: u32 = 0x24;
+
+#[derive(Clone)]
+pub(super) struct ModelPool {
+    models: Vec<ModelSlots>,
+}
+#[derive(Clone)]
+struct ModelSlots {
+    initial: Arc<Effect>,
+    free: FixedVec<Effect, SLOTS_PER_MODEL>,
+}
+impl ModelPool {
+    fn load(archive: &Archive) -> Result<Self> {
+        Ok(Self::from_definitions(&load_common(archive)?))
+    }
+    fn from_definitions(definitions: &[Arc<Effect>]) -> Self {
+        let mut pool = Self {
+            models: Vec::with_capacity(definitions.len()),
+        };
+        for definition in definitions {
+            pool.add(Arc::clone(definition));
+        }
+        pool
+    }
+    pub(super) fn add(&mut self, initial: Arc<Effect>) {
+        let mut free = FixedVec::default();
+        for _ in 0..SLOTS_PER_MODEL {
+            free.push((*initial).clone());
+        }
+        self.models.push(ModelSlots { initial, free });
+    }
+    fn take(&mut self, descriptor: u32) -> Effect {
+        self.models
+            .iter_mut()
+            .find(|model| model.initial.descriptor == descriptor)
+            .expect("effect descriptor was not loaded")
+            .free
+            .pop()
+            .expect("effect model pool exhausted")
+    }
+    fn release(&mut self, mut effect: Effect) {
+        let model = self
+            .models
+            .iter_mut()
+            .find(|model| model.initial.descriptor == effect.descriptor)
+            .unwrap();
+        effect.reset(&model.initial);
+        model.free.push(effect);
+    }
+}
+pub(super) fn load_common(archive: &Archive) -> Result<Vec<Arc<Effect>>> {
+    MODEL_IDS
+        .into_iter()
+        .chain([WARP_MODEL])
+        .map(|id| Effect::load(archive, id).map(Arc::new))
+        .collect()
+}
+impl Effects {
+    /// Decode the supported common models and prepare every reusable slot.
+    /// Archives, trees and animation byte streams are never cloned in the tick.
+    pub fn load(archive: &Archive) -> Result<Self> {
+        Ok(Self::from_models(ModelPool::load(archive)?))
+    }
+    /// Allocate independent animation slots from shared immutable definitions.
+    pub fn from_resources(resources: &Resources) -> Self {
+        let mut effects = Self::from_models(ModelPool::from_definitions(&resources.models));
+        effects.character_banks = resources.character_banks.clone();
+        effects.loaded_banks = resources.loaded_banks;
+        effects
+    }
+    fn from_models(models: ModelPool) -> Self {
+        Self {
+            events: Default::default(),
+            camera_quakes: Default::default(),
+            quake_models: false,
+            draws: DrawLog(Vec::with_capacity(DRAW_CAPACITY)),
+            direct_draws: Default::default(),
+            instances: Default::default(),
+            models,
+            gobjs: Default::default(),
+            character_banks: Default::default(),
+            loaded_banks: 0,
+            next_joint: 0,
+            fighter_joints: [false; FIGHTER_SLOTS * FIGHTER_JOINT_STRIDE],
+            item_joints: FixedVec::default(),
+            item_bones: FixedVec::default(),
+            item_roots: FixedVec::default(),
+        }
+    }
+    pub(super) fn recycle_where(&mut self, remove: impl Fn(&Effect) -> bool) {
+        let mut index = 0;
+        while index < self.instances.len() {
+            if remove(self.instances.iter().nth(index).unwrap()) {
+                let effect = self.instances.remove(index);
+                self.release(effect);
+            } else {
+                index += 1;
+            }
+        }
+    }
+    pub(super) fn acquire(&mut self, descriptor: u32, particles: &mut ParticleSystem) -> Effect {
+        self.make_room(descriptor, 1, particles);
+        let mut effect = self.models.take(descriptor);
+        // efLib_Create's GObj_Create (eflib.c:481).
+        effect.gobj = self.gobjs.create(hsd_gobj::GObjClass::Effect);
+        effect
+    }
+    /// efLib_remove_user_data's model goes back to its pool; its GObj is
+    /// freed (HSD_GObjPLink_80390228).
+    fn release(&mut self, effect: Effect) {
+        self.gobjs.destroy(hsd_gobj::GObjClass::Effect, effect.gobj);
+        self.models.release(effect);
+    }
+    pub(super) fn make_room(
+        &mut self,
+        descriptor: u32,
+        count: usize,
+        particles: &mut ParticleSystem,
+    ) {
+        if is_sync(descriptor) {
+            assert!(
+                self.instances
+                    .iter()
+                    .filter(|e| is_sync(e.descriptor))
+                    .count()
+                    + count
+                    <= SYNC_CAPACITY,
+                "synchronous effect pool capacity exhausted"
+            );
+            return;
+        }
+        assert!(count <= ASYNC_CAPACITY);
+        while self
+            .instances
+            .iter()
+            .filter(|e| !is_sync(e.descriptor))
+            .count()
+            + count
+            > ASYNC_CAPACITY
+        {
+            // efLib_RemoveLast (8005BBB4): p_link 11 before p_link 12,
+            // oldest first in each, and efLib_Destroy skips sync models.
+            let index = self
+                .instances
+                .iter()
+                .position(|e| !is_sync(e.descriptor) && e.descriptor != 0x19)
+                .or_else(|| self.instances.iter().position(|e| !is_sync(e.descriptor)))
+                .unwrap();
+            let effect = self.instances.remove(index);
+            for &joint in effect.joints.iter() {
+                self.events.expire_joint(effect.joint_base + joint.0);
+                particles.expire_joint(effect.joint_base + joint.0);
+            }
+            self.release(effect);
+        }
+    }
+    /// Camera_RequestQuake for a one-shot kind from a flush: the scene
+    /// starts the animation (`drain_camera_quakes`); the model's GObj is
+    /// created here, where grLib_801C9CEC's GObj_Create falls among the
+    /// flush's effect models.
+    pub(super) fn request_camera_quake(&mut self, kind: u16, position: Vec3) {
+        let gobj = self
+            .quake_models
+            .then(|| self.gobjs.create(hsd_gobj::GObjClass::Quake));
+        self.camera_quakes.push((kind, position, gobj));
+    }
+    /// Pending camera requests in dispatch order; the scene forwards them
+    /// to Camera_RequestQuake.
+    pub fn drain_camera_quakes(&mut self, mut quake: impl FnMut(CameraQuake)) {
+        while !self.camera_quakes.is_empty() {
+            quake(self.camera_quakes.remove(0));
+        }
+    }
+}
+impl Effect {
+    pub(super) fn reset(&mut self, initial: &Self) {
+        self.velocity = None;
+        self.attachment = None;
+        self.owner = None;
+        self.lifetime = initial.lifetime;
+        self.indefinite = initial.indefinite;
+        self.attachment_bone = None;
+        self.scale_attachment = true;
+        self.callback_rotation = None;
+        self.facing_rotation = None;
+        self.follow_bone = None;
+        self.follow_item = None;
+        self.item_bone = None;
+        self.child_drift_z = None;
+        self.blade_transition = false;
+        self.expiring = false;
+        self.hitlag_pause = initial.hitlag_pause;
+        self.joint_base = 0;
+        self.tree.events.clear();
+        // The prepared model has immutable topology and fixed animation tracks.
+        // Restore pose, material values and playback while retaining all storage.
+        for &id in self.joints.iter() {
+            let source = initial.tree.get(id);
+            let target = self.tree.get_mut(id);
+            target.flags = source.flags;
+            target.rotate = source.rotate;
+            target.scale = source.scale;
+            target.translate = source.translate;
+            target.mtx = source.mtx;
+            target.scl = source.scl;
+            for (target, source) in target.dobj.iter_mut().zip(&source.dobj) {
+                target.flags = source.flags;
+                if let (Some(target), Some(source)) = (&mut target.mobj, &source.mobj) {
+                    target.restore_playback(source);
+                }
+            }
+            if let (Some(target), Some(source)) = (&mut target.aobj, &source.aobj) {
+                target.restore_playback(source);
+            }
+        }
+    }
+}
+
+/// Supported sync-load rows: shields/entry (efasync.c:407,429,453,751)
+/// egg shells (efsync.c:84,228-292) and Ganondorf's efSync models
+/// (efsync.c:594-640), and Final Cutter's blade (efAlt_Spawn sets
+/// EF_LOADKIND_SYNC, efalt.c:31). All other modeled rows use async load.
+fn is_sync(descriptor: u32) -> bool {
+    matches!(descriptor, 0xB | 0xC | 0xD | 0xE | 0x1E | 0x1F | 0x24 | 0xBB8..=0xBBD | 0xFA0..=0xFA1 | 0x1388..=0x138A | 0x1B58..=0x1B5C | 0x3A98 | 0x3E80..=0x3E81 | 0x4A38..=0x4A3D | 0xBF68..=0xBF69)
+}

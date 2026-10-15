@@ -1,0 +1,16 @@
+[package]
+name = "slp"
+description = "Slippi .slp replay parser: per-frame inputs, RNG seed, and post-frame state, converted to harness scenarios and canonical traces"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = "1.1"
+melee-diff = { path = "../melee-diff" }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "slp-dump"
+path = "src/bin/slp_dump.rs"

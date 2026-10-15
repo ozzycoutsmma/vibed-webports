@@ -1,0 +1,284 @@
+//! Motion helpers Ness's rows share (ft_081B.c, ft_084E.c, ftcommon.c).
+use crate::init::Ness;
+use melee_ft::{
+    collision::{air, ecb::EcbPose, ground},
+    fighter::{
+        assets::{FighterAssets, Result},
+        state::{callbacks, CollisionPhase, InputPhase, MotionRow, PhysicsPhase},
+        ActionId, Fighter, MotionEntryFlags,
+    },
+    physics::{airborne, grounded},
+};
+use melee_it::{ItemControl, ItemRequest};
+use melee_types::{CommonMotionState, GroundOrAir, ItemKind};
+
+/// ftCommon_GroundAirColl_MF (ftCommon/forward.h:9-12): SkipMatAnim |
+/// SkipColAnim | UpdateCmd | SkipItemVis | Unk19 | SkipModelPartVis |
+/// SkipModelFlags | Unk27.
+pub const GROUND_AIR: MotionEntryFlags = MotionEntryFlags(0x0C4C_5080);
+/// Ft_MF_KeepGfx.
+pub const KEEP_GFX: u32 = 1 << 1;
+/// Ft_MF_SkipHit.
+pub const SKIP_HIT: u32 = 1 << 3;
+
+/// A ported row of ftNs_Init_MotionStateTable; `animation` is the table's
+/// anim_id column (0x803CC650).
+pub const fn row(
+    action: ActionId,
+    animation: i32,
+    anim: melee_ft::fighter::state::AnimFn,
+    iasa: melee_ft::fighter::state::InputFn,
+    physics: melee_ft::fighter::state::PhysicsFn,
+    collision: melee_ft::fighter::state::CollisionFn,
+) -> MotionRow {
+    MotionRow {
+        action,
+        id: CommonMotionState::None,
+        animation,
+        anim,
+        iasa,
+        physics,
+        collision,
+        camera: callbacks::camera::follow_fighter,
+        implemented: true,
+    }
+}
+
+/// The empty IASA callbacks.
+pub fn no_input(_: &mut Fighter, _: InputPhase<'_>) {}
+
+/// Fighter_ChangeMotionState(gobj, state, flags, start, rate, 0, NULL).
+pub fn change(
+    f: &mut Fighter,
+    state: ActionId,
+    flags: MotionEntryFlags,
+    start: f32,
+    rate: f32,
+    assets: &FighterAssets,
+) -> Result<()> {
+    f.change_motion_state_with_flags(state, assets, flags, start, rate)
+}
+
+/// ft_8008A2BC: Wait.
+pub fn wait(f: &mut Fighter, assets: &FighterAssets) -> Result<()> {
+    f.change_motion_state(CommonMotionState::Wait.into(), assets)
+}
+
+/// ftCo_Fall_Enter: Fall, leaving the ground first when grounded.
+pub fn fall(f: &mut Fighter, assets: &FighterAssets) -> Result<()> {
+    if f.physics.ground_or_air == GroundOrAir::Ground {
+        f.leave_ground();
+    }
+    f.change_motion_state(CommonMotionState::Fall.into(), assets)
+}
+
+/// ftCommon_GroundToAirStateChange: ftCommon_8007D5D4, then the airborne
+/// row at the current frame with `flags`.
+pub fn ground_to_air(
+    f: &mut Fighter,
+    state: ActionId,
+    flags: MotionEntryFlags,
+    assets: &FighterAssets,
+) -> Result<()> {
+    f.leave_ground();
+    let frame = f.animation.frame;
+    change(f, state, flags, frame, 1.0, assets)
+}
+
+/// ftCommon_AirToGroundStateChange: ftCommon_8007D7FC, then the grounded
+/// row at the current frame with `flags`.
+pub fn air_to_ground(
+    f: &mut Fighter,
+    state: ActionId,
+    flags: MotionEntryFlags,
+    assets: &FighterAssets,
+) -> Result<()> {
+    f.land();
+    let frame = f.animation.frame;
+    change(f, state, flags, frame, 1.0, assets)
+}
+
+/// ftCommon_ClampSelfVelX (8007D440).
+pub fn clamp_self_velocity_x(f: &mut Fighter, maximum: f32) {
+    let velocity = f.physics.self_velocity.x;
+    if velocity < -maximum {
+        f.physics.self_velocity.x = -maximum;
+    } else if velocity > maximum {
+        f.physics.self_velocity.x = maximum;
+    }
+}
+
+/// ft_80082708 (80082708): ordinary ground collision that walks off the
+/// floor's edge. True while supported.
+pub fn stays_grounded(f: &mut Fighter, p: &mut CollisionPhase<'_>) -> bool {
+    let c = &mut f.core;
+    ground::map_ground_action(
+        &mut c.physics,
+        &mut c.collision,
+        p.map,
+        &mut c.skeleton,
+        c.animation.root,
+        c.input.current.stick.x,
+    ) == ground::WaitGroundResult::Supported
+}
+
+/// ft_800827A0 (800827A0): ground collision that stops at the floor's
+/// edge. True while supported.
+pub fn stays_on_edge(f: &mut Fighter, p: &mut CollisionPhase<'_>) -> bool {
+    let c = &mut f.core;
+    ground::map_escape(
+        &mut c.physics,
+        &mut c.collision,
+        p.map,
+        &mut c.skeleton,
+        c.animation.root,
+        c.input.current.stick.x,
+    ) == ground::WaitGroundResult::Supported
+}
+
+/// ft_80081D0C (80081D0C): ordinary airborne collision; true on landing.
+pub fn lands(f: &mut Fighter, p: &mut CollisionPhase<'_>) -> bool {
+    let c = &mut f.core;
+    air::begin_map(
+        &c.physics,
+        &mut c.collision,
+        &mut c.skeleton,
+        c.animation.root,
+    );
+    air::collide_air_dodge(
+        &mut c.physics,
+        &mut c.collision,
+        p.map,
+        &mut c.skeleton,
+        c.animation.root,
+    )
+}
+
+/// ft_80084F3C (80084F3C): ground friction (scaled above walk speed) and
+/// ftCommon_ApplyGroundMovement, with Fighter_procUpdate's tail.
+pub fn ground_friction(f: &mut Fighter, p: PhysicsPhase<'_>) {
+    callbacks::physics::guard_on(f, p);
+}
+
+/// ft_80084EEC (80084EEC): gravity and air friction, no stick input, with
+/// Fighter_procUpdate's tail.
+pub fn air_friction_fall(f: &mut Fighter, p: PhysicsPhase<'_>) {
+    let air = &f.core.attributes.air;
+    let physics = &mut f.core.physics;
+    physics.self_velocity.y =
+        airborne::gravity(physics.self_velocity.y, air.gravity, air.terminal_velocity);
+    physics.animation_velocity.x =
+        airborne::drift_acceleration(physics.self_velocity.x, 0.0, 0.0, air);
+    f.core.finish_air_update(p.assets, p.wind);
+}
+
+/// ft_CheckGroundAndLedge (800822A4) with CLIFFCATCH_BOTH (0): true on
+/// landing; with no ledge cooldown the ledges on either side are tested.
+pub fn lands_or_finds_ledge(f: &mut Fighter, p: &mut CollisionPhase<'_>) -> bool {
+    let c = &mut f.core;
+    air::begin_map(
+        &c.physics,
+        &mut c.collision,
+        &mut c.skeleton,
+        c.animation.root,
+    );
+    let cd = &mut c.collision.data;
+    cd.last_pos = cd.cur_pos;
+    cd.cur_pos = c.physics.position;
+    let pose = EcbPose::read(&mut c.skeleton, c.animation.root, cd);
+    let landed = if c.status.ledge_cooldown == 0 {
+        melee_mp::set_facing_dir(cd, 0);
+        p.map.air_collide_ledge(cd, Some(&|i| pose.position(i)))
+    } else {
+        p.map.air_collide_pass(cd, Some(&|i| pose.position(i)))
+    };
+    c.physics.position = cd.cur_pos;
+    c.skeleton
+        .set_translate(c.animation.root, &c.physics.position);
+    landed
+}
+
+/// ftCommon_ApplyGroundMovement (8007CB74): self_vel from gr_vel along the
+/// floor.
+pub fn apply_ground_movement(f: &mut Fighter, p: &PhysicsPhase<'_>) {
+    let core = &mut f.core;
+    grounded::apply_ground_movement(
+        &mut core.physics,
+        core.collision.data.floor.normal,
+        p.map.floor_speed_scale(&core.collision.data),
+    );
+}
+
+/// Fighter_procUpdate's grounded tail, for a physics callback that moved
+/// the fighter itself.
+pub fn finish_ground_update(f: &mut Fighter, p: &PhysicsPhase<'_>) {
+    let core = &mut f.core;
+    grounded::finish_ground_update(
+        &mut core.physics,
+        &core.collision.data,
+        &grounded::GroundedParameters::from_attributes(&core.attributes, &p.assets.common),
+        p.map,
+        p.wind,
+    );
+}
+
+/// ftCommon_Fall (8007D494): gravity, then the terminal-speed clamp.
+pub fn fall_at(f: &mut Fighter, gravity: f32, terminal: f32) {
+    f.physics.self_velocity.y = airborne::gravity(f.physics.self_velocity.y, gravity, terminal);
+}
+
+/// `fp->parts[n]`: Ness's code indexes the parts array with the part enum
+/// directly (no ftParts_GetBoneIndex).
+pub fn part(part: melee_types::FtPart) -> usize {
+    i32::from(part) as usize
+}
+
+/// Fighter_ChangeMotionState's efAsync_QueueFlush (fighter.c:951) from an
+/// animation callback: what the outgoing script issued this frame spawns
+/// before the change, ahead of the new script's frame-0 effects and colour
+/// step.
+pub fn seal_graphics(f: &mut Fighter, assets: &FighterAssets, rng: &mut gekko_math::HsdRng) {
+    if !f.core.commands.graphics.is_empty() {
+        f.core.resolve_graphics_commands(assets, rng);
+    }
+}
+
+/// ft_PlaySFX(fp, id, 127, 64) for an id outside the footstep range (no
+/// pitch draw).
+pub fn play_sound(f: &mut Fighter, id: u32) {
+    use melee_ft::fighter::commands::{FootstepSound, SoundChannel};
+    f.commands.footstep_sounds.push(FootstepSound {
+        channel: SoundChannel::Ordinary,
+        id,
+        volume: 127,
+        pan: 64,
+    });
+}
+
+/// ft_80088478(fp, id, 127, 64): the fighter's looping-sound handle
+/// (Fighter +214C).
+pub fn play_loop_sound(f: &mut Fighter, id: u32) {
+    use melee_ft::fighter::commands::{FootstepSound, SoundChannel};
+    f.commands.footstep_sounds.push(FootstepSound {
+        channel: SoundChannel::Loop,
+        id,
+        volume: 127,
+        pan: 64,
+    });
+}
+
+/// An article of `kind` Ness owns is destroyed at once (the kinds'
+/// Item_8026A8EC wrappers: it_802AD6B8 for the bat).
+pub fn remove_article(f: &mut Fighter, kind: ItemKind) {
+    f.core.item_requests.push(ItemRequest::Control {
+        owner: f.player.id,
+        kind,
+        control: ItemControl::Remove,
+    });
+}
+
+/// take_dmg_cb and death2_cb = ftNs_Init_OnDamage, installed with an
+/// article until the next motion change.
+pub fn install_damage_callbacks(f: &mut Fighter) {
+    f.character.get_mut::<Ness>().damage_callbacks = true;
+}

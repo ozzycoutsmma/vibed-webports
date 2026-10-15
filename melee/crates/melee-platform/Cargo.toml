@@ -1,0 +1,23 @@
+[package]
+name = "melee-platform"
+description = "libmelee: the shared application core (disc, menu flow, session, wgpu renderer) with a C API"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+gc-disc = { path = "../gc-disc" }
+gekko-math = { path = "../gekko-math" }
+hsd-anim = { path = "../hsd-anim" }
+hsd-archive = { path = "../hsd-archive" }
+melee-lib = { path = "../melee-lib" }
+melee-replay = { path = "../melee-replay" }
+anyhow = { workspace = true }
+wgpu = "30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+melee-test-support = { path = "../melee-test-support" }

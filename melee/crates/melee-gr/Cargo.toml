@@ -1,0 +1,18 @@
+[package]
+name = "melee-gr"
+description = "Stage logic and stage-specific behaviour (decomp src/melee/gr). Split per stage if it grows past ~30k lines"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hsd-archive = { path = "../hsd-archive" }
+hsd-anim = { path = "../hsd-anim" }
+hsd-types = { path = "../hsd-types" }
+melee-types = { path = "../melee-types" }
+melee-mp = { path = "../melee-mp" }
+melee-lb = { path = "../melee-lb" }
+melee-cm = { path = "../melee-cm" }
+gekko-math = { path = "../gekko-math" }
+
+[dev-dependencies]
+melee-test-support = { path = "../melee-test-support" }

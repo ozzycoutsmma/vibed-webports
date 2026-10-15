@@ -1,0 +1,16 @@
+[package]
+name = "ft-mario"
+description = "Fighter: Mario (decomp src/melee/ft/kinds/ftMario)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ft-mario-family = { path = "../ft-mario-family" }
+melee-types = { path = "../melee-types" }
+melee-ft = { path = "../melee-ft" }
+hsd-types = { path = "../hsd-types" }
+hsd-archive = { path = "../hsd-archive" }
+gekko-math = { path = "../gekko-math" }
+
+[dev-dependencies]
+melee-test-support = { path = "../melee-test-support" }

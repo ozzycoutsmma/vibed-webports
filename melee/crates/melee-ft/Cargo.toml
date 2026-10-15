@@ -1,0 +1,27 @@
+[package]
+name = "melee-ft"
+description = "Common fighter logic: physics, action states, ftCo_* shared behaviours, collision (decomp src/melee/ft minus kinds/ and CPU)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+melee-it = { path = "../melee-it" }
+melee-coll = { path = "../melee-coll" }
+melee-cmd = { path = "../melee-cmd" }
+melee-cm = { path = "../melee-cm" }
+melee-ef = { path = "../melee-ef" }
+melee-types = { path = "../melee-types" }
+melee-mp = { path = "../melee-mp" }
+melee-lb = { path = "../melee-lb" }
+hsd-gobj = { path = "../hsd-gobj" }
+hsd-anim = { path = "../hsd-anim" }
+hsd-archive = { path = "../hsd-archive" }
+gekko-math = { path = "../gekko-math" }
+hsd-types = { path = "../hsd-types" }
+melee-gr = { path = "../melee-gr" }
+
+[dev-dependencies]
+melee-test-support = { path = "../melee-test-support" }
+serde_json.workspace = true
+melee-diff = { path = "../melee-diff" }
+ft-fox = { path = "../ft-fox" }

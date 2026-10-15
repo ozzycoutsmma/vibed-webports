@@ -1,0 +1,19 @@
+[package]
+name = "it-foxlaser"
+description = "Fox/Falco laser and blaster item state tables"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+melee-it = { path = "../melee-it" }
+melee-types = { path = "../melee-types" }
+hsd-anim = { path = "../hsd-anim" }
+hsd-types = { path = "../hsd-types" }
+gekko-math = { path = "../gekko-math" }
+melee-lb = { path = "../melee-lb" }
+
+[dev-dependencies]
+hsd-archive = { path = "../hsd-archive" }
+melee-test-support = { path = "../melee-test-support" }
+melee-mp = { path = "../melee-mp" }
+hsd-gobj = { path = "../hsd-gobj" }

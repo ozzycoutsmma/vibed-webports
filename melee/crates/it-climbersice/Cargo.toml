@@ -1,0 +1,10 @@
+[package]
+name = "it-climbersice"
+description = "The Ice Climbers' ice block and Blizzard (itclimbersice.c, itclimbersblizzard.c)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+melee-it = { path = "../melee-it" }
+melee-types = { path = "../melee-types" }
+gekko-math = { path = "../gekko-math" }

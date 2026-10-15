@@ -1,0 +1,806 @@
+//! Particle creation and bytecode simulation (`particle.c`).
+use crate::rng_sites::{DISCRETE_ROTATION, RANDOM_SIZE, RANDOM_SPEED, RANDOM_TEXTURE_FLIP};
+use crate::{
+    bank::Descriptor,
+    color::ColorTrack,
+    program::Cursor,
+    rng_sites::{DrawLog, PRIMARY_COLOR},
+    Error,
+};
+use gekko_math::{
+    fma::{fmadds, fmsubs},
+    msl::{fctiwz, sqrtf},
+    rng::HsdRng,
+};
+use hsd_anim::mtx::InverseTrig;
+use std::sync::Arc;
+
+/// Kind flags used by simulation; all other retail bits are retained.
+pub const PAUSED: u32 = 0x800;
+pub const GRAVITY: u32 = 1;
+pub const FRICTION: u32 = 2;
+pub const TORNADO: u32 = 4;
+pub const TEXTURED: u32 = 0x400;
+
+/// Owned `HSD_Particle` state (psstructs.h, retail allocation 0x80398C04).
+#[derive(Debug, Clone)]
+pub struct Particle {
+    /// Input ordinal for allocation-free stable display bucketing. Not retail
+    /// state; rewritten before sorting and never read by simulation math.
+    pub(crate) display_order: usize,
+    pub generator_id: Option<usize>,
+    pub family_id: u16,
+    pub bank: u8,
+    pub link: u8,
+    pub kind: u32,
+    pub texture_group: u8,
+    pub pose: u8,
+    pub palette: u8,
+    pub program: Arc<[u8]>,
+    pub pc: u16,
+    pub mark: u16,
+    pub loop_start: u16,
+    pub loop_count: u8,
+    pub wait: u16,
+    pub life: u16,
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub gravity: f32,
+    pub friction: f32,
+    pub size: f32,
+    pub size_target: f32,
+    pub size_timer: u16,
+    pub rotation: f32,
+    pub rotation_target: f32,
+    pub rotation_timer: u16,
+    pub primary: ColorTrack,
+    pub environment: ColorTrack,
+    pub trail: f32,
+    /// HSD_Particle.aCmpCount/Remain/Param1/Param2/targets (+0x54,78,57,58,7A).
+    pub alpha_compare: BytePairTrack,
+    /// HSD_Particle.aCmpMode (+0x56).
+    pub alpha_compare_mode: u8,
+    /// HSD_Particle.pJObjOfs (+0x59).
+    pub point_joint_offset: u8,
+    /// HSD_Particle.matColCount/Remain/RGB/A/targets (+0x5A,74,7C,7D,80).
+    pub material: BytePairTrack,
+    /// HSD_Particle.ambColCount/Remain/RGB/A/targets (+0x5C,76,7E,7F,82).
+    pub ambient: BytePairTrack,
+    /// HSD_Particle.appsrt (+0x8C), normalized owned AppSRT index.
+    pub appsrt_id: Option<usize>,
+    pub application_transform: Option<Arc<crate::generator::ApplicationTransform>>,
+    /// Availability from the owning texture group; no image bytes needed.
+    pub texture_images: Arc<[bool]>,
+}
+impl Particle {
+    /// `psGenerateParticle0` (particle.c, 0x80398C04). The caller inserts
+    /// at the list head *before* the optional immediate interpretation.
+    pub fn new(descriptor: &Descriptor, bank: u8, link: u8) -> Result<Self, Error> {
+        if link >= 16 {
+            return Err(Error::InvalidLink(link));
+        }
+        Ok(Self {
+            display_order: 0,
+            generator_id: None,
+            family_id: 0,
+            bank,
+            link,
+            kind: descriptor.kind,
+            texture_group: descriptor.texture_group as u8,
+            pose: 0,
+            palette: 255,
+            program: Arc::clone(&descriptor.program),
+            pc: 0,
+            mark: 0,
+            loop_start: 0,
+            loop_count: 0,
+            wait: u16::from(!descriptor.program.is_empty()),
+            life: descriptor.particle_life.wrapping_add(1),
+            position: [0.0; 3],
+            velocity: descriptor.velocity,
+            gravity: descriptor.gravity,
+            friction: descriptor.friction,
+            size: descriptor.size,
+            size_target: 0.0,
+            size_timer: 0,
+            rotation: 0.0,
+            rotation_target: 0.0,
+            rotation_timer: 0,
+            primary: ColorTrack::new([255; 4]),
+            environment: ColorTrack::new([0; 4]),
+            trail: 1.0,
+            // particle.c:461-483; retail 0x80398E18..0x80398E7C: stb/sth.
+            alpha_compare: BytePairTrack::new([1, 255]),
+            alpha_compare_mode: 0x33,
+            point_joint_offset: 0,
+            material: BytePairTrack::new([255; 2]),
+            ambient: BytePairTrack::new([255; 2]),
+            appsrt_id: None,
+            application_transform: None,
+            texture_images: crate::bank::empty_images(),
+        })
+    }
+
+    /// `hsd_8039930C` (particle.c, 0x8039930C). Returns false on deletion.
+    /// An error terminates the simulation; callers must not continue a partial
+    /// tick after unsupported bytecode or corrupt data.
+    pub fn update<T: InverseTrig>(
+        &mut self,
+        rng: &mut HsdRng,
+        draws: &mut DrawLog,
+    ) -> Result<bool, Error> {
+        self.update_with_generators::<T>(
+            None,
+            Some(T::atan2f),
+            &mut [None; 8],
+            rng,
+            draws,
+            &mut |_, _, _, _, _| {
+                Err(Error::UnsupportedFeature(
+                    "generator opcode requires ParticleSystem",
+                ))
+            },
+        )
+    }
+
+    pub(crate) fn update_with_generators<T: InverseTrig>(
+        &mut self,
+        tornado: Option<TornadoPhysics>,
+        atan2: Option<fn(f32, f32) -> f32>,
+        point_joints: &mut [Option<[f32; 3]>; 8],
+        rng: &mut HsdRng,
+        draws: &mut DrawLog,
+        spawn: &mut impl FnMut(
+            &Particle,
+            u32,
+            Option<u8>,
+            &mut HsdRng,
+            &mut DrawLog,
+        ) -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        if self.kind & PAUSED != 0 {
+            return Ok(true);
+        }
+        self.interpolate();
+        if self.wait != 0 {
+            self.wait -= 1;
+            if self.wait == 0 {
+                self.interpret::<T>(atan2, point_joints, rng, draws, spawn)?;
+            }
+        }
+        self.life = self.life.wrapping_sub(1);
+        if self.life == 0 {
+            // hsd_8039D048 (particle.c:2864): the deleted particle's point
+            // joint goes.
+            self.release_point_joint(point_joints);
+            return Ok(false);
+        }
+        if self.kind & TORNADO != 0 {
+            tornado
+                .ok_or(Error::UnsupportedFeature("tornado requires live generator"))?
+                .integrate(self);
+        } else {
+            self.integrate();
+        }
+        self.drive_point_joint(point_joints);
+        Ok(true)
+    }
+
+    /// particle.c:2922-2950: a particle that owns a point joint (0xBF)
+    /// moves it onto itself: a fresh joint (HSD_JObjAlloc, translation zero)
+    /// when the slot is empty, then each axis's translation gains the
+    /// particle's position minus the joint's (separate fsubs, fadds).
+    fn drive_point_joint(&self, point_joints: &mut [Option<[f32; 3]>; 8]) {
+        if self.kind & POINT_JOINT == 0 {
+            return;
+        }
+        let joint = point_joints[point_joint_slot(self.kind)].get_or_insert([0.0; 3]);
+        for (translation, position) in joint.iter_mut().zip(self.position) {
+            *translation += position - *translation;
+        }
+    }
+
+    /// hsd_8039D048 (8039D048): a deleted particle's point joint is released.
+    pub(crate) fn release_point_joint(&self, point_joints: &mut [Option<[f32; 3]>; 8]) {
+        if self.kind & POINT_JOINT != 0 {
+            point_joints[point_joint_slot(self.kind)] = None;
+        }
+    }
+
+    /// hsd_80398F8C (80398F8C): rotate velocity around a random cone azimuth.
+    fn randomize_direction(
+        &mut self,
+        angle: f32,
+        atan2: fn(f32, f32) -> f32,
+        rng: &mut HsdRng,
+        draws: &mut DrawLog,
+    ) {
+        use gekko_math::msl::{cosf, fabsf, sinf};
+        let guarded = |y, x| {
+            if fabsf(x) < f32::MIN_POSITIVE {
+                if y >= 0.0 {
+                    std::f32::consts::FRAC_PI_2
+                } else {
+                    -std::f32::consts::FRAC_PI_2
+                }
+            } else {
+                atan2(y, x)
+            }
+        };
+        let [x, y, z] = self.velocity;
+        let first = guarded(y, z);
+        let (sin_a, cos_a) = (sinf(first), cosf(first));
+        // retail 80399044 fmuls, 80399048 fmadds.
+        let second = guarded(x, fmadds(y, sin_a, z * cos_a));
+        let (sin_b, cos_b) = (sinf(second), cosf(second));
+        // retail 803990B8/BC fmadds; sqrtf Newton steps DC/EC/FC.
+        let magnitude = sqrtf(fmadds(z, z, fmadds(x, x, y * y)));
+        let azimuth =
+            (2.0 * (std::f64::consts::PI * f64::from(draws.draw(rng, 0x8039_9114)))) as f32;
+        let radial = magnitude * sinf(angle);
+        let d = radial * cosf(azimuth);
+        let e = radial * sinf(azimuth);
+        let forward = magnitude * cosf(angle);
+        // retail 80399178, 180/190, 18C/194 preserve nested FMA order.
+        self.velocity = [
+            fmadds(d, cos_b, forward * sin_b),
+            fmadds(cos_b, forward * sin_a, fmadds(sin_b, -d * sin_a, e * cos_a)),
+            fmadds(cos_b, forward * cos_a, fmsubs(sin_b, -d * cos_a, e * sin_a)),
+        ];
+    }
+
+    fn interpolate(&mut self) {
+        // retail 0x803993B0..0x803993BC and 0x80399544..0x80399550:
+        // fsubs/fdivs/fadds, no contraction.
+        if self.size_timer != 0 {
+            self.size += (self.size_target - self.size) / f32::from(self.size_timer);
+            self.size_timer -= 1;
+        }
+        self.primary.tick();
+        self.environment.tick();
+        self.material.tick();
+        self.ambient.tick();
+        self.alpha_compare.tick();
+        if self.rotation_timer != 0 {
+            self.rotation +=
+                (self.rotation_target - self.rotation) / f32::from(self.rotation_timer);
+            self.rotation_timer -= 1;
+        }
+    }
+
+    fn integrate(&mut self) {
+        // retail 0x8039CB90..0x8039CC1C: separate subtract, multiply, add.
+        if self.kind & GRAVITY != 0 {
+            self.velocity[1] -= self.gravity;
+        }
+        if self.kind & FRICTION != 0 {
+            for value in &mut self.velocity {
+                *value *= self.friction;
+            }
+        }
+        for (position, velocity) in self.position.iter_mut().zip(self.velocity) {
+            *position += velocity;
+        }
+    }
+
+    fn interpret<T: InverseTrig>(
+        &mut self,
+        atan2: Option<fn(f32, f32) -> f32>,
+        point_joints: &[Option<[f32; 3]>; 8],
+        rng: &mut HsdRng,
+        draws: &mut DrawLog,
+        spawn: &mut impl FnMut(
+            &Particle,
+            u32,
+            Option<u8>,
+            &mut HsdRng,
+            &mut DrawLog,
+        ) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let program = Arc::clone(&self.program);
+        let mut cursor = Cursor {
+            bytes: &program,
+            pc: self.pc,
+        };
+        // Valid programs yield at a wait or end. Bound malformed zero-time
+        // loops explicitly instead of hanging the host or silently yielding.
+        for _ in 0..65_536 {
+            let opcode_pc = cursor.pc;
+            let opcode = cursor.byte()?;
+            if opcode < 0x80 {
+                let mut wait = u16::from(opcode & 0x1f);
+                if opcode & 0x20 != 0 {
+                    wait = (wait << 8) | u16::from(cursor.byte()?);
+                }
+                if opcode & 0x40 != 0 {
+                    self.pose = cursor.byte()?;
+                    self.enable_texture();
+                }
+                if wait != 0 {
+                    self.pc = cursor.pc;
+                    self.wait = wait;
+                    return Ok(());
+                }
+            } else if opcode < 0xa0 {
+                self.vector_command(opcode, &mut cursor)?;
+            } else if opcode & 0xf0 == 0xc0 || opcode & 0xf0 == 0xd0 {
+                let track = if opcode & 0xf0 == 0xc0 {
+                    &mut self.primary
+                } else {
+                    &mut self.environment
+                };
+                track.setup(opcode & 15, &mut cursor)?;
+            } else {
+                match opcode {
+                    0xb8 => {
+                        let index =
+                            usize::from(cursor.byte()?) + usize::from(self.point_joint_offset);
+                        let force = cursor.float()?;
+                        let range = cursor.float()?;
+                        let target = *point_joints.get(index).ok_or(Error::UnsupportedFeature(
+                            "point-joint index exceeds retail slots",
+                        ))?;
+                        if force_toward_joint(
+                            self.position,
+                            &mut self.velocity,
+                            target,
+                            force,
+                            range,
+                        ) {
+                            self.life = 1;
+                            self.pc = cursor.pc;
+                            self.wait = 0;
+                            return Ok(());
+                        }
+                    }
+                    0xa9 => {
+                        let angle = cursor.float()?;
+                        self.randomize_direction(
+                            angle,
+                            atan2.ok_or(Error::UnsupportedFeature("A9 requires inverse trig"))?,
+                            rng,
+                            draws,
+                        );
+                    }
+                    0xa5 | 0xef => {
+                        // particle.c:1070-1191: child creation is synchronous;
+                        // RNG precedes the next instruction, even if parent dies.
+                        let kind = u32::from(cursor.short()?);
+                        let blend = if opcode == 0xef {
+                            Some(cursor.byte()?)
+                        } else {
+                            None
+                        };
+                        spawn(self, kind, blend, rng, draws)?;
+                    }
+                    0xbf => {
+                        // particle.c:2058-2064: the particle drives point
+                        // joint (index + pJObjOfs) & 7 from now on.
+                        let index = u32::from(cursor.byte()?) + u32::from(self.point_joint_offset);
+                        self.kind |= ((index & 7) << 12) | POINT_JOINT;
+                    }
+                    0xfa => {
+                        self.loop_count = cursor.byte()?;
+                        self.loop_start = cursor.pc;
+                    }
+                    0xfb => {
+                        self.loop_count = self.loop_count.wrapping_sub(1);
+                        if self.loop_count != 0 {
+                            cursor.pc = self.loop_start;
+                        }
+                    }
+                    0xfc => self.mark = cursor.pc,
+                    0xfd => cursor.pc = self.mark,
+                    0xfe | 0xff => {
+                        self.life = 1;
+                        self.pc = cursor.pc;
+                        self.wait = 0;
+                        return Ok(());
+                    }
+                    0xa7 => {
+                        let threshold = cursor.byte()?;
+                        if i32::from(threshold) >= fctiwz(100.0 * draws.draw(rng, 0x8039_A430)) {
+                            self.life = 1;
+                            self.pc = cursor.pc;
+                            self.wait = 0;
+                            return Ok(());
+                        }
+                    }
+                    _ => self.command::<T>(opcode, opcode_pc, &mut cursor, rng, draws)?,
+                }
+            }
+        }
+        Err(Error::InstructionLimit { pc: cursor.pc })
+    }
+
+    fn enable_texture(&mut self) {
+        if self
+            .texture_images
+            .get(usize::from(self.pose))
+            .copied()
+            .unwrap_or(false)
+        {
+            self.kind |= TEXTURED;
+        }
+    }
+
+    fn vector_command(&mut self, opcode: u8, pc: &mut Cursor<'_>) -> Result<(), Error> {
+        let vector = if opcode < 0x90 {
+            &mut self.position
+        } else {
+            &mut self.velocity
+        };
+        for (axis, value) in vector.iter_mut().enumerate() {
+            if opcode & (1 << axis) != 0 {
+                let operand = pc.float()?;
+                if opcode & 8 != 0 {
+                    *value += operand;
+                } else {
+                    *value = operand;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn command<T: InverseTrig>(
+        &mut self,
+        opcode: u8,
+        opcode_pc: u16,
+        pc: &mut Cursor<'_>,
+        rng: &mut HsdRng,
+        draws: &mut DrawLog,
+    ) -> Result<(), Error> {
+        match opcode {
+            0xa0 | 0xac => {
+                self.size_timer = pc.timer()?;
+                self.size_target = pc.float()?;
+                if opcode == 0xac {
+                    let range = pc.float()?;
+                    // retail 0x8039A818: fmadds
+                    self.size_target =
+                        fmadds(range, draws.draw(rng, RANDOM_SIZE), self.size_target);
+                }
+                if self.size_timer == 0 {
+                    self.size = self.size_target;
+                }
+            }
+            0xa1 => self.kind &= !TEXTURED,
+            0xa2 => {
+                self.gravity = pc.float()?;
+                self.set_flag(GRAVITY, self.gravity != 0.0);
+            }
+            0xa3 => {
+                self.friction = pc.float()?;
+                self.set_flag(FRICTION, self.friction != 1.0);
+            }
+            0xa6 => {
+                let base = pc.short()?;
+                let range = pc.short()?;
+                self.life = base
+                    .wrapping_add(fctiwz(f32::from(range) * draws.draw(rng, 0x8039_A3F4)) as u16);
+            }
+            0xa8 => {
+                for (axis, site) in [0x8039_A490, 0x8039_A4D4, 0x8039_A51C]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let range = pc.float()?;
+                    // retail 0x8039A4A4, 0x8039A4EC, 0x8039A528: fmsubs;
+                    // subsequent position addition remains separate.
+                    self.position[axis] += fmsubs(2.0 * range, draws.draw(rng, site), range);
+                }
+            }
+            0xa9 => {
+                self.velocity =
+                    super::direction::randomize::<T>(self.velocity, pc.float()?, rng, draws);
+            }
+            0xab => {
+                let scale = pc.float()?;
+                for value in &mut self.velocity {
+                    *value *= scale;
+                }
+            }
+            0xad => self.kind |= 0x80,
+            0xae => self.kind &= !0x60,
+            0xaf => self.kind = (self.kind & !0x40) | 0x20,
+            0xb0 => self.kind = (self.kind & !0x20) | 0x40,
+            0xb1 => self.kind |= 0x60,
+            // hsd_8039930C (0x8039930C), particle.c:1502-1547.
+            // Alpha comparison uses signed 16.16 integer interpolation.
+            0xb3 => {
+                let track = &mut self.alpha_compare;
+                if track.duration != 0 {
+                    let step = (i32::from(track.remaining) << 16) / i32::from(track.duration);
+                    for (current, target) in track.current.iter_mut().zip(track.target) {
+                        let delta = step.wrapping_mul(i32::from(*current) - i32::from(target));
+                        *current = ((i32::from(target) << 16).wrapping_add(delta) >> 16) as u8;
+                    }
+                }
+                track.duration = pc.timer()?;
+                self.alpha_compare_mode = pc.byte()?;
+                track.target = [pc.byte()?, pc.byte()?];
+                track.remaining = track.duration;
+                if track.duration == 0 {
+                    track.current = track.target;
+                }
+            }
+            // retail 0x8039AADC: fadds; immediate stfs at 0x8039AAF4.
+            0xb6 => {
+                self.rotation_timer = pc.timer()?;
+                self.rotation_target += pc.float()?;
+                if self.rotation_timer == 0 {
+                    self.rotation = self.rotation_target;
+                }
+            }
+            0xbd => {
+                let base = pc.float()?;
+                let range = pc.float()?;
+                // retail 0x8039B5E8: fmadds; B5EC..B604: unfused squared magnitude.
+                let speed = fmadds(range, draws.draw(rng, RANDOM_SPEED), base);
+                let [x, y, z] = self.velocity;
+                let magnitude = sqrtf((x * x + y * y) + z * z);
+                if magnitude > 1e-10 {
+                    let scale = speed / magnitude;
+                    for value in &mut self.velocity {
+                        *value *= scale;
+                    }
+                }
+            }
+            0xe0 => {
+                ColorTrack::random_dual(&mut self.primary, &mut self.environment, pc, rng, draws)?
+            }
+            0xe9 => ColorTrack::random_dual_stepped(
+                &mut self.primary,
+                &mut self.environment,
+                pc,
+                rng,
+                draws,
+            )?,
+            0xba => self.primary.random_delta(pc, rng, draws, PRIMARY_COLOR)?,
+            0xbb => self.environment.random_delta(
+                pc,
+                rng,
+                draws,
+                [0x8039_B2F0, 0x8039_B360, 0x8039_B3D4, 0x8039_B448],
+            )?,
+            0xbc => {
+                let base = pc.byte()?;
+                let range = pc.byte()?;
+                // retail 0x8039B514: fmadds before fctiwz/stb
+                self.pose = fctiwz(fmadds(
+                    f32::from(range),
+                    draws.draw(rng, 0x8039_B4FC),
+                    f32::from(base),
+                )) as u8;
+                self.enable_texture();
+            }
+            0xbe => {
+                for value in &mut self.velocity {
+                    *value *= pc.float()?;
+                }
+            }
+            0xe3 => self.palette = pc.byte()?,
+            0xe4 | 0xe5 => self.texture_flip(opcode, pc.byte()?, rng, draws),
+            0xe6 => self.kind |= 1 << 21,
+            0xe7 => self.kind &= !(1 << 21),
+            0xe8 => {
+                let trail = pc.float()?;
+                if trail < 0.0 {
+                    self.kind &= !(1 << 20);
+                } else {
+                    self.kind |= 1 << 20;
+                    self.trail = trail;
+                }
+            }
+            0xed => self.random_rotation(pc, rng, draws)?,
+            _ => {
+                return Err(Error::UnsupportedOpcode {
+                    opcode,
+                    pc: opcode_pc,
+                })
+            }
+        }
+        Ok(())
+    }
+
+    fn set_flag(&mut self, flag: u32, enabled: bool) {
+        if enabled {
+            self.kind |= flag;
+        } else {
+            self.kind &= !flag;
+        }
+    }
+
+    fn texture_flip(&mut self, opcode: u8, mode: u8, rng: &mut HsdRng, draws: &mut DrawLog) {
+        let flag = if opcode == 0xe4 { 1 << 18 } else { 1 << 19 };
+        match mode & 3 {
+            0 => self.kind &= !flag,
+            1 => self.kind |= flag,
+            2 => self.kind ^= flag,
+            _ => {
+                let site = if opcode == 0xe4 {
+                    RANDOM_TEXTURE_FLIP[0]
+                } else {
+                    RANDOM_TEXTURE_FLIP[1]
+                };
+                self.set_flag(flag, draws.draw(rng, site) >= 0.5);
+            }
+        }
+    }
+
+    fn random_rotation(
+        &mut self,
+        pc: &mut Cursor<'_>,
+        rng: &mut HsdRng,
+        draws: &mut DrawLog,
+    ) -> Result<(), Error> {
+        let base = pc.float()?;
+        let range = pc.float()?;
+        let divisions = pc.byte()?;
+        let delta = if divisions != 0 {
+            let index =
+                fctiwz(f32::from(u16::from(divisions) + 1) * draws.draw(rng, DISCRETE_ROTATION));
+            // retail 0x8039C8C4..0x8039C8CC: fmuls/fdivs/fadds.
+            base + (range * index as f32) / f32::from(divisions)
+        } else {
+            // retail 0x8039C8D8: fmadds
+            fmadds(range, draws.draw(rng, 0x8039_C8D4), base)
+        };
+        self.rotation_target += delta;
+        self.rotation += delta;
+        Ok(())
+    }
+}
+
+/// Two-byte countdown tracks in HSD_Particle (psstructs.h:154-183).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BytePairTrack {
+    pub current: [u8; 2],
+    pub target: [u8; 2],
+    pub duration: u16,
+    pub remaining: u16,
+}
+impl BytePairTrack {
+    pub fn display_values(&self) -> [u8; 2] {
+        let mut values = self.current;
+        crate::color::display_bytes(
+            &self.current,
+            &self.target,
+            self.duration,
+            self.remaining,
+            &mut values,
+        );
+        values
+    }
+
+    fn new(current: [u8; 2]) -> Self {
+        Self {
+            current,
+            target: [0; 2],
+            duration: 0,
+            remaining: 0,
+        }
+    }
+    fn tick(&mut self) {
+        // particle.c:732-766 (hsd_8039930C): integer countdown, then copy.
+        // Retail 0x80399474/78/7C (material), 0x803994B0/B4/B8
+        // (ambient), 0x803994EC/F0/F4 (alpha): lhz/subi/sth; zero
+        // branches copy target bytes at 0x80399494, 0x803994D0, 0x8039950C.
+        if self.duration != 0 {
+            self.remaining = self.remaining.wrapping_sub(1);
+            if self.remaining == 0 {
+                self.duration = 0;
+                self.current = self.target;
+            }
+        }
+    }
+}
+
+/// Live generator inputs for particle.c's Tornado physics (8039CA78).
+#[derive(Clone, Copy)]
+pub(crate) struct TornadoPhysics {
+    pub position: [f32; 3],
+    pub speed: f32,
+    pub radius: f32,
+    pub angle: f32,
+    pub angular_speed: f32,
+}
+impl TornadoPhysics {
+    fn integrate(self, p: &mut Particle) {
+        use gekko_math::{
+            fma::{fmadds, fmsubs},
+            msl::{cosf, fabsf, sinf, tanf},
+        };
+        let (sin_a, sin_b) = (sinf(p.gravity), sinf(p.friction));
+        let (cos_a, cos_b) = (cosf(p.gravity), cosf(p.friction));
+        p.velocity[2] += self.speed;
+        // retail 8039CAFC fmadds, CB04 fmuls.
+        let radius =
+            fmadds(p.velocity[2], tanf(fabsf(self.angle)), fabsf(self.radius)) * p.velocity[1];
+        p.velocity[0] += self.angular_speed;
+        let d = radius * cosf(p.velocity[0]);
+        let e = radius * sinf(p.velocity[0]);
+        let z = p.velocity[2];
+        // retail CB38, CB40/54, CB60/68; final translations are separate fadds.
+        p.position[0] = self.position[0] + fmadds(d, cos_b, z * sin_b);
+        p.position[1] =
+            self.position[1] + fmadds(cos_b, z * sin_a, fmadds(sin_b, -d * sin_a, e * cos_a));
+        p.position[2] =
+            self.position[2] + fmadds(cos_b, z * cos_a, fmsubs(sin_b, -d * cos_a, e * sin_a));
+    }
+}
+
+/// hsd_803991D8: B8 attracts toward a registered joint, killing inside its radius.
+/// Particle kind bit 15: the particle drives a point joint (0xBF), whose
+/// slot is bits 12..14.
+pub(crate) const POINT_JOINT: u32 = 0x8000;
+
+/// The point-joint slot a particle drives.
+fn point_joint_slot(kind: u32) -> usize {
+    ((kind >> 12) & 7) as usize
+}
+
+fn force_toward_joint(
+    position: [f32; 3],
+    velocity: &mut [f32; 3],
+    target: Option<[f32; 3]>,
+    force: f32,
+    range: f32,
+) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    if range < 0.0 {
+        return false;
+    }
+    let [dx, dy, dz] = [
+        target[0] - position[0],
+        target[1] - position[1],
+        target[2] - position[2],
+    ];
+    // Retail 80399290/294: dy*dy, then two ordered fmadds.
+    let distance = fmadds(dz, dz, fmadds(dx, dx, dy * dy));
+    if distance <= range * range {
+        return true;
+    }
+    if distance == 0.0 {
+        return false;
+    }
+    let scale = force / distance;
+    // Retail 803992CC/D8/E4: one fmadds per velocity component.
+    for (value, delta) in velocity.iter_mut().zip([dx, dy, dz]) {
+        *value = fmadds(scale, delta, *value);
+    }
+    false
+}
+#[cfg(test)]
+mod point_force_tests {
+    use super::force_toward_joint;
+    /// Provenance: particle.c:1635 case 0xB8, calling
+    /// hsd_803991D8 at 803991D8. The instruction is reached by Reflector's
+    /// effect particles at tick 37; the scene replay covers the unbound slot.
+    /// Distances here exercise the helper's exact <= boundary and 1/r^2 force.
+    #[test]
+    fn proximity_kills_before_acceleration_and_absent_joint_does_nothing() {
+        let mut velocity = [1.0, 2.0, 3.0];
+        assert!(!force_toward_joint([0.0; 3], &mut velocity, None, 8.0, 1.0));
+        assert_eq!(velocity, [1.0, 2.0, 3.0]);
+        assert!(force_toward_joint(
+            [0.0; 3],
+            &mut velocity,
+            Some([2.0, 0.0, 0.0]),
+            8.0,
+            2.0
+        ));
+        assert_eq!(velocity, [1.0, 2.0, 3.0]);
+        assert!(!force_toward_joint(
+            [0.0; 3],
+            &mut velocity,
+            Some([2.0, 0.0, 0.0]),
+            8.0,
+            1.0
+        ));
+        assert_eq!(velocity, [5.0, 2.0, 3.0]);
+    }
+}

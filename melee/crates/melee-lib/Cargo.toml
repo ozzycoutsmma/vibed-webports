@@ -1,0 +1,90 @@
+[package]
+name = "melee-lib"
+description = "Deterministic Melee matches: create, step, inspect, and clone"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ft-fox-family = { path = "../ft-fox-family" }
+it-foxillusion = { path = "../it-foxillusion" }
+it-bombhei = { path = "../it-bombhei" }
+it-sword = { path = "../it-sword" }
+it-dosei = { path = "../it-dosei" }
+it-yoshieggthrow = { path = "../it-yoshieggthrow" }
+it-peach = { path = "../it-peach" }
+it-pikachu = { path = "../it-pikachu" }
+it-heiho = { path = "../it-heiho" }
+it-seak = { path = "../it-seak" }
+it-zelda = { path = "../it-zelda" }
+it-foxlaser = { path = "../it-foxlaser" }
+it-yoshistar = { path = "../it-yoshistar" }
+it-mariofire = { path = "../it-mariofire" }
+it-luigifire = { path = "../it-luigifire" }
+it-climbersice = { path = "../it-climbersice" }
+it-mariocape = { path = "../it-mariocape" }
+it-drmariopill = { path = "../it-drmariopill" }
+melee-coll = { path = "../melee-coll" }
+melee-cmd = { path = "../melee-cmd" }
+melee-ef = { path = "../melee-ef" }
+melee-if = { path = "../melee-if" }
+melee-types = { path = "../melee-types" }
+hsd-types = { path = "../hsd-types" }
+melee-ft = { path = "../melee-ft" }
+melee-cpu = { path = "../melee-cpu" }
+melee-cm = { path = "../melee-cm" }
+melee-it = { path = "../melee-it" }
+melee-gr = { path = "../melee-gr" }
+melee-mp = { path = "../melee-mp" }
+melee-lb = { path = "../melee-lb" }
+hsd-gobj = { path = "../hsd-gobj" }
+hsd-anim = { path = "../hsd-anim" }
+hsd-archive = { path = "../hsd-archive" }
+gekko-math = { path = "../gekko-math" }
+ft-fox = { path = "../ft-fox" }
+ft-mars = { path = "../ft-mars" }
+ft-emblem = { path = "../ft-emblem" }
+ft-falco = { path = "../ft-falco" }
+ft-captain = { path = "../ft-captain" }
+ft-peach = { path = "../ft-peach" }
+ft-yoshi = { path = "../ft-yoshi" }
+ft-purin = { path = "../ft-purin" }
+ft-pikachu = { path = "../ft-pikachu" }
+ft-pichu = { path = "../ft-pichu" }
+ft-mario = { path = "../ft-mario" }
+ft-drmario = { path = "../ft-drmario" }
+ft-luigi = { path = "../ft-luigi" }
+ft-ganon = { path = "../ft-ganon" }
+ft-iceclimbers = { path = "../ft-iceclimbers" }
+ft-samus = { path = "../ft-samus" }
+it-samus = { path = "../it-samus" }
+ft-gamewatch = { path = "../ft-gamewatch" }
+it-gamewatch = { path = "../it-gamewatch" }
+ft-seak = { path = "../ft-seak" }
+ft-zelda = { path = "../ft-zelda" }
+ft-link = { path = "../ft-link" }
+it-link = { path = "../it-link" }
+ft-younglink = { path = "../ft-younglink" }
+ft-donkey = { path = "../ft-donkey" }
+ft-koopa = { path = "../ft-koopa" }
+it-koopaflame = { path = "../it-koopaflame" }
+ft-ness = { path = "../ft-ness" }
+ft-kirby = { path = "../ft-kirby" }
+it-kirby = { path = "../it-kirby" }
+it-ness = { path = "../it-ness" }
+ft-mewtwo = { path = "../ft-mewtwo" }
+it-mewtwo = { path = "../it-mewtwo" }
+melee-diff = { path = "../melee-diff", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+hsd-particle = { path = "../hsd-particle" }
+
+[dev-dependencies]
+melee-test-support = { path = "../melee-test-support" }
+toml = "1.1"
+
+melee-sim = { path = "../melee-sim" }
+
+[[bench]]
+name = "lifecycle"
+harness = false

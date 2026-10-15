@@ -1,0 +1,108 @@
+import json
+import struct
+
+import pytest
+
+from validate_ticks import draw_count, lcg, main, validate
+
+
+def record(p0, p1, seed=123):
+    def field(frame):
+        return {"t": "f32", "v": {"bits": struct.unpack(">I", struct.pack(">f", frame))[0],
+                                  "approx": -999}}  # deliberately wrong approximation
+    return {"frame": 99, "phase": "frame_end", "state": {
+        "p0.cur_anim_frame": field(p0), "p1.cur_anim_frame": field(p1),
+        "rng.seed": {"t": "u", "v": seed}}}
+
+
+def test_unit_steps_restarts_and_zero_through_k_draws():
+    rows = [record(118, 0), record(119, 1), record(0, 2, lcg(123)),
+            record(1, 0, lcg(lcg(lcg(123))))]
+    result = validate(rows, max_draws=2)
+    assert result == {"records": 4, "histogram": {0: 1, 1: 1, 2: 1}, "violations": []}
+    assert lcg(0xFFFFFFFF) == 2316998  # overflow is modulo 2^32
+
+
+def test_duplicate_skipped_ticks_and_rng_bound_report_ordinals():
+    rows = [record(11, 15), record(13, 16), record(13, 18), record(15, 18, lcg(lcg(123)))]
+    result = validate(rows, max_draws=1)
+    # 11 -> 13 and 13 -> 15 skip a frame (straddled ticks); 13 -> 13 is a legal
+    # hold; 16 -> 18 skips; the last seed needs two draws but only one is allowed.
+    assert len(result["violations"]) == 4
+    assert sum("ordinal 2:" in line for line in result["violations"]) == 1
+    assert "not reachable in 0..1" in result["violations"][-1]
+    assert draw_count(123, lcg(lcg(123)), 2) == 2
+    assert draw_count(123, lcg(123), 0) is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_animation_is_invalid(bad):
+    assert validate([record(0, 0), record(bad, 1)])["violations"]
+
+
+def test_missing_fighter_or_empty_trace_is_invalid():
+    row = record(1, 1)
+    del row["state"]["p1.cur_anim_frame"]
+    assert "field set changed" in validate([record(0, 0), row])["violations"][0]
+    assert validate([])["violations"]
+    assert validate([record(0, 0)])["violations"]
+
+
+def test_large_f32_advance_is_judged_by_exact_difference():
+    # A hold is legal at any magnitude; a jump that is not exactly +1 is not.
+    assert not validate([record(2**60, 0), record(2**60, 1)])["violations"]
+    assert validate([record(2**60, 0), record(2**60 * 1.5, 1)])["violations"]
+
+
+def test_tick_metadata_allows_two_ticks_per_vi_but_rejects_counter_gap():
+    rows = [record(0, 0), record(1, 1)]
+    for i, row in enumerate(rows):
+        row.update(tick=100+i, vi_frame=5, watch_value=99+i, watch_address=0x80479D58)
+    assert not validate(rows)["violations"]
+    rows[1].update(tick=102, watch_value=101)
+    assert validate(rows)["violations"] == ["ordinal 1: nonconsecutive game tick"]
+
+
+def test_cli_exit_status_and_histogram(tmp_path, capsys):
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text("\n" + json.dumps(record(0, 0)) + "\n" + json.dumps(record(1, 1)))
+    assert main([str(trace)]) == 0
+    assert "{0: 1}" in capsys.readouterr().out
+    trace.write_text(json.dumps(record(0, 0)) + "\n" + json.dumps(record(2, 1)))
+    assert main([str(trace)]) == 1
+    assert "ordinal 1: p0.cur_anim_frame" in capsys.readouterr().out
+    trace.write_text("not json")
+    assert main([str(trace)]) == 1
+    assert "invalid trace" in capsys.readouterr().out
+
+
+def test_scripted_mode_accepts_non_unit_animation_rates():
+    import validate_ticks as v
+    seed = 5
+    records = [{"state": {"rng.seed": {"t": "u", "v": seed},
+                          "p0.cur_anim_frame": {"t": "f32", "v": {"bits": 0x40000000}}}},
+               {"state": {"rng.seed": {"t": "u", "v": seed},
+                          "p0.cur_anim_frame": {"t": "f32", "v": {"bits": 0x40400000}}}}]  # 2.0 -> 3.0
+    records[1]["state"]["p0.cur_anim_frame"]["v"]["bits"] = 0x40900000  # 4.5: rate 2.5
+    assert v.validate(iter(records))["violations"]
+    assert not v.validate(iter(records), scripted=True)["violations"]
+
+
+def test_an_online_recording_reaches_each_seed_from_the_netplay_seed_of_its_tick():
+    from validate_ticks import online_seed
+
+    # The seeds of crates/slp/tests/data/v3.16.slp's first frames (offset 0x3AAE):
+    # the scene frame counter turned sixteen bits, plus the offset.
+    assert [online_seed(ordinal, 0x3AAE) for ordinal in (1, 2, 5)] == [0x3AAE, 0x13AAE, 0x43AAE]
+    assert online_seed(0x10003, 0xFFFF) == 0x30000  # the counter's high half wraps round
+    offset = 39851
+    # Record 0 is the boundary; record n ends the tick seeded for scene frame n - 1.
+    rows = [record(0, 0, 7), record(1, 1, online_seed(1, offset)),
+            record(2, 2, lcg(lcg(online_seed(2, offset)))), record(3, 3, lcg(online_seed(3, offset)))]
+    assert validate(rows, max_draws=2, online_rng_offset=offset) == {
+        "records": 4, "histogram": {0: 1, 1: 1, 2: 1}, "violations": []}
+    # Without the offset no record follows the one before.
+    assert len(validate(rows, max_draws=2)["violations"]) == 3
+    # A seed off the tick's stream is still a violation.
+    rows[2] = record(2, 2, online_seed(3, offset))
+    assert len(validate(rows, max_draws=2, online_rng_offset=offset)["violations"]) == 1

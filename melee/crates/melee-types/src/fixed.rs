@@ -1,0 +1,122 @@
+//! Small inline collections; capacity exhaustion is explicit, never heap growth.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixedVec<T, const N: usize> {
+    entries: [Option<T>; N],
+    len: usize,
+}
+impl<T, const N: usize> Default for FixedVec<T, N> {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+            len: 0,
+        }
+    }
+}
+impl<T, const N: usize> FixedVec<T, N> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn push(&mut self, value: T) {
+        assert!(self.len < N, "inline storage capacity {N} exhausted");
+        self.entries[self.len] = Some(value);
+        self.len += 1;
+    }
+    pub fn insert(&mut self, index: usize, value: T) {
+        assert!(index <= self.len);
+        self.push(value);
+        self.entries[index..self.len].rotate_right(1);
+    }
+    pub fn clear(&mut self) {
+        while self.pop().is_some() {}
+    }
+    pub fn last_mut(&mut self) -> Option<&mut T> {
+        self.entries[..self.len].last_mut().and_then(Option::as_mut)
+    }
+    pub fn contains(&self, value: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.iter().any(|entry| entry == value)
+    }
+    pub fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        self.entries[self.len].take()
+    }
+    pub fn remove(&mut self, index: usize) -> T {
+        assert!(index < self.len);
+        let value = self.entries[index].take().unwrap();
+        self.entries[index..self.len].rotate_left(1);
+        self.len -= 1;
+        value
+    }
+    /// Move the entries out in order, leaving `self` empty: the
+    /// `for x in std::mem::take(&mut queue)` idiom for per-tick request
+    /// queues, except that an empty queue copies no storage.
+    pub fn take_all(&mut self) -> impl Iterator<Item = T> {
+        (self.len != 0)
+            .then(|| std::mem::take(self))
+            .into_iter()
+            .flatten()
+    }
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.entries[..self.len].iter().map(|v| v.as_ref().unwrap())
+    }
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut T> {
+        self.entries[..self.len]
+            .iter_mut()
+            .map(|v| v.as_mut().unwrap())
+    }
+}
+
+impl<T, const N: usize> IntoIterator for FixedVec<T, N> {
+    type Item = T;
+    type IntoIter = std::iter::Flatten<std::iter::Take<std::array::IntoIter<Option<T>, N>>>;
+    /// Entries past `len` are always `None`; the walk stops at `len`.
+    fn into_iter(self) -> Self::IntoIter {
+        let len = self.len;
+        self.entries.into_iter().take(len).flatten()
+    }
+}
+
+impl<T, const N: usize> std::ops::Index<usize> for FixedVec<T, N> {
+    type Output = T;
+    fn index(&self, index: usize) -> &T {
+        self.entries[..self.len][index].as_ref().unwrap()
+    }
+}
+impl<T, const N: usize> FromIterator<T> for FixedVec<T, N> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut result = Self::default();
+        for value in iter {
+            result.push(value);
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FixedVec;
+
+    #[test]
+    fn take_all_moves_entries_in_order_and_empties() {
+        let mut queue: FixedVec<u32, 8> = FixedVec::default();
+        assert_eq!(queue.take_all().count(), 0);
+        for value in [3, 1, 4, 1, 5] {
+            queue.push(value);
+        }
+        queue.remove(1);
+        queue.insert(0, 9);
+        let taken: Vec<u32> = queue.take_all().collect();
+        assert_eq!(taken, [9, 3, 4, 1, 5]);
+        assert!(queue.is_empty());
+        queue.push(2);
+        assert_eq!(queue.into_iter().collect::<Vec<_>>(), [2]);
+    }
+}
