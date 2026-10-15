@@ -1,0 +1,99 @@
+/* Phones and tablets (www/mobile.js, docs/MOBILE.md): the on-screen controls, the "turn your
+   phone" hint, safe areas and the touch tweaks of the home menu. Everything here is scoped to
+   body.touch-on / coarse pointers, so desktop pages look as before. */
+
+html { touch-action: manipulation; overscroll-behavior: none; -webkit-text-size-adjust: 100%; }
+/* While the game is up (race or the game's own menus) nothing scrolls or zooms. */
+body.ingame { touch-action: none; overscroll-behavior: none; -webkit-user-select: none; user-select: none; }
+#gl { -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+
+/* ---- the overlay ---- */
+#touch { position: fixed; inset: 0; z-index: 25; pointer-events: none; font-family: var(--font); -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; touch-action: none; }
+#touch[hidden] { display: none; }
+#touch .cluster, #touch .top, #t-zone, #t-gesture, #touch .mstick { display: none; }
+/* Race: the stick zone on the left, the buttons on the right, pause at the top. */
+#touch[data-mode="race"] #t-zone, #touch[data-mode="race"] .cluster.race, #touch[data-mode="race"] .top { display: block; }
+/* The game's menus: a d-pad + A / B, gestures on the rest of the screen. */
+#touch[data-mode="menu"] #t-gesture, #touch[data-mode="menu"] .cluster.menu, #touch[data-mode="menu"] .top, #touch[data-mode="menu"] .mstick { display: block; }
+#touch[data-mode="menu"] .cluster.menu { display: flex; }
+
+#t-gesture { position: absolute; inset: 0; pointer-events: auto; }
+#t-zone { position: absolute; left: 0; top: 0; bottom: 0; width: 48%; pointer-events: auto; }
+#t-base { position: absolute; width: 150px; height: 150px; margin: -75px 0 0 -75px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12); border: 3px solid rgba(255, 255, 255, 0.55); box-shadow: 0 0 0 2px rgba(6, 26, 68, 0.5); }
+#t-base[hidden] { display: none; }
+#t-knob { position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; border-radius: 50%; transform: translate(-50%, -50%);
+  background: radial-gradient(circle at 35% 30%, #fff, #cfd9ea 70%); border: 3px solid var(--mk-navy); box-shadow: 0 6px 14px rgba(0, 0, 0, 0.45); }
+#t-hint { position: absolute; left: max(16px, env(safe-area-inset-left)); bottom: max(14px, env(safe-area-inset-bottom)); color: #fff; font-weight: 800;
+  font-size: 13px; opacity: 0.55; text-shadow: 0 1px 2px #000; pointer-events: none; }
+
+#touch .cluster { position: absolute; pointer-events: auto; }
+#touch .cluster.race { right: max(10px, env(safe-area-inset-right)); bottom: max(10px, env(safe-area-inset-bottom)); width: 240px; height: 230px; }
+#touch .cluster.menu { right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); gap: 14px; align-items: flex-end; }
+#touch .top { position: absolute; top: max(8px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); display: flex; gap: 8px; pointer-events: auto; }
+
+#touch .tb { position: absolute; display: grid; place-items: center; width: 74px; height: 74px; border-radius: 50%; padding: 0; margin: 0;
+  font: 900 26px/1 var(--font); color: #fff; background: rgba(6, 26, 68, 0.55); border: 3px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45); text-shadow: 0 2px 0 rgba(0, 0, 0, 0.5); cursor: pointer; touch-action: none;
+  -webkit-user-select: none; user-select: none; transition: transform 0.05s ease, background 0.05s ease; }
+#touch .tb small { display: block; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.85; margin-top: 2px; }
+#touch .tb.on { transform: scale(0.92); background: var(--mk-yellow); color: var(--mk-navy); text-shadow: none; }
+#touch .tb.a { right: 0; bottom: 56px; width: 92px; height: 92px; font-size: 34px; background: rgba(229, 37, 33, 0.7); }
+#touch .tb.b { right: 96px; bottom: 10px; background: rgba(27, 99, 214, 0.7); }
+#touch .tb.drift { right: 10px; bottom: 156px; background: rgba(61, 194, 74, 0.7); }
+#touch .tb.item { right: 150px; bottom: 100px; background: rgba(255, 138, 0, 0.75); }
+#touch .tb.look { right: 150px; bottom: 170px; width: 58px; height: 58px; font-size: 16px; }
+#touch .tb.small { position: static; width: auto; height: 42px; border-radius: 999px; padding: 0 16px; font-size: 15px; }
+#touch .cluster.menu .tb { position: static; }
+#touch .cluster.menu .tb.a { width: 84px; height: 84px; }
+#touch .mstick { position: absolute; left: max(16px, env(safe-area-inset-left)); bottom: max(16px, env(safe-area-inset-bottom)); width: 150px; height: 150px; border-radius: 50%; pointer-events: auto; touch-action: none;
+  background: radial-gradient(circle, rgba(6, 26, 68, 0.35) 0 55%, rgba(6, 26, 68, 0.6) 56% 100%); border: 3px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45); -webkit-user-select: none; user-select: none; }
+#touch .mstick::before { content: ""; position: absolute; inset: 14px; border-radius: 50%; border: 2px dashed rgba(255, 255, 255, 0.35); pointer-events: none; }
+#touch .mknob { position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; margin: -32px 0 0 -32px; border-radius: 50%; pointer-events: none;
+  background: rgba(255, 255, 255, 0.92); box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5); transition: transform 0.04s linear; }
+
+/* ---- turn the phone (portrait while the game is up) ---- */
+#rotate { display: none; position: fixed; inset: 0; z-index: 60; align-items: center; justify-content: center; flex-direction: column; gap: 18px;
+  background: rgba(6, 26, 68, 0.96); color: #fff; font: 900 22px var(--font); text-align: center; padding: 24px;
+  padding-top: max(24px, env(safe-area-inset-top)); padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+#rotate .phone { width: 54px; height: 96px; border: 4px solid #fff; border-radius: 10px; animation: turn 1.6s ease-in-out infinite; }
+#rotate .phone::after { content: ""; position: absolute; left: 50%; bottom: 6px; width: 14px; height: 4px; margin-left: -7px; background: #fff; border-radius: 2px; }
+#rotate .phone { position: relative; }
+#rotate small { font-size: 14px; font-weight: 700; color: #c9d6f2; }
+@keyframes turn { 0%, 15% { transform: rotate(0); } 55%, 100% { transform: rotate(-90deg); } }
+@media (orientation: portrait) {
+  body.touch-on.ingame #rotate { display: flex; }
+}
+@media (prefers-reduced-motion: reduce) { #rotate .phone { animation: none; transform: rotate(-90deg); } }
+
+/* ---- safe areas and touch sizes of the home menu ---- */
+@supports (padding: env(safe-area-inset-left)) {
+  #home .scroll { padding-left: max(clamp(16px, 4vw, 56px), env(safe-area-inset-left)); padding-right: max(clamp(16px, 4vw, 56px), env(safe-area-inset-right));
+    padding-top: max(18px, env(safe-area-inset-top)); }
+  #home .under { padding-bottom: env(safe-area-inset-bottom); background: linear-gradient(transparent, rgba(6, 26, 68, 0.6)); }
+  #ui { top: max(14px, env(safe-area-inset-top)); }
+  #net-banner { top: max(10px, env(safe-area-inset-top)); }
+  #live-indicator { top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); }
+}
+@media (pointer: coarse) {
+  #home button.small, #home select, #home input[type=text] { min-height: 44px; font-size: 16px; }
+  #home input[type=checkbox] { width: 24px; height: 24px; }
+  #home input[type=range] { height: 36px; }
+  #home details.options summary { min-height: 48px; }
+  #home ul.rooms li button { min-height: 44px; }
+  #home .under .hint { display: none; }
+  #help { display: none; }
+}
+/* Landscape phones: a shorter logo so the first choice is on screen. */
+@media (max-height: 460px) and (orientation: landscape) {
+  #home .brand { margin-bottom: 4px; }
+  #brand-logo { height: 54px; }
+  .logo-css .l1 { font-size: 24px; } .logo-css .l2 { font-size: 16px; } .logo-css .l8 { font-size: 56px; }
+  #home .brand-sub { display: none; }
+  #home .cards .card { min-height: 84px; padding: 10px 14px; }
+  #home .card .icon { width: 56px; height: 52px; }
+  #home .card .desc { display: none; }
+  #home .scroll { padding-top: max(8px, env(safe-area-inset-top)); }
+}

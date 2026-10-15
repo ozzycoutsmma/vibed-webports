@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-GEY68TSF8J"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-GEY68TSF8J');
+</script>
+<title>MK8 Web</title>
+<meta name="theme-color" content="#061a44">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MK8 Web">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+<link rel="stylesheet" href="./menu.css">
+<link rel="stylesheet" href="./mobile.css">
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="ui">
+  <select id="course" class="hidden"></select>
+  <button id="start" class="hidden">Start</button>
+  <span id="status">loading wasm...</span>
+</div>
+<div id="kartsel" class="hidden">
+  <label for="sel-driver">Driver</label><select id="sel-driver"></select>
+  <label for="sel-body">Body</label><select id="sel-body"></select>
+  <label for="sel-tire">Tires</label><select id="sel-tire"></select>
+  <label for="sel-glider">Glider</label><select id="sel-glider"></select>
+  <div class="bars" id="sel-bars"></div>
+</div>
+<div id="hud"></div>
+<div id="kart-tags"></div>
+<div id="net-banner" hidden></div>
+<button id="live-indicator" hidden title="Your camera is live (sent to the players in your room). Click to turn it off.">&#9679; CAMERA LIVE - tap to turn off</button>
+<button id="fs-btn" type="button" title="Fullscreen" aria-label="Toggle fullscreen" aria-pressed="false">&#9974;</button>
+<!-- One-time "what's new" notice (www/main.js): shown once per browser; Got it or Esc closes it. -->
+<div id="news" hidden role="dialog" aria-modal="true" aria-labelledby="news-title">
+  <div class="news-card">
+    <h2 id="news-title">Update Time!</h2>
+    <p>Sorry for the abrupt stop... again.. I added a way to kick pesky trolls out of your lobby and also made ads les invasive (sorry they were causing issues on some devices, i hate popups too)</p>
+    <button id="news-ok" type="button">Got it</button>
+  </div>
+</div>
+
+<!-- The page's own front menu (www/home.js): SINGLEPLAYER / ONLINE, options, rooms. -->
+<div id="home" data-page="main">
+  <div class="mk-bg">
+    <canvas class="art set-single" id="bg-single"></canvas>
+    <canvas class="art set-online" id="bg-online"></canvas>
+    <div class="shade"></div>
+    <canvas class="hero set-single" id="hero-single"></canvas>
+    <canvas class="hero set-online" id="hero-online"></canvas>
+    <div class="stripes"></div><div class="check"></div><div class="mono"></div>
+  </div>
+  <div class="scroll" id="home-scroll">
+    <div class="frame">
+      <!-- Proceeds banner (dismissable, remembered in this browser; wired by www/ads.js). -->
+      <div id="jude" class="jude" role="status">
+        <span class="jude-heart" aria-hidden="true">&#10084;</span>
+        <span class="jude-text">Once the site cost is paid for, all proceeds from the ads on this page go to <strong>St. Jude Children&rsquo;s Research Hospital</strong>.</span>
+        <button id="jude-close" class="jude-close" type="button" aria-label="Dismiss this message" title="Dismiss">&#10005;</button>
+      </div>
+      <header class="brand">
+        <div class="logo" aria-label="Mario Kart 8 Deluxe">
+          <canvas id="brand-logo" hidden></canvas>
+          <div class="logo-css" id="logo-css" aria-hidden="true"><span class="l1">Mario Kart</span><span class="l2">Deluxe</span><span class="l8">8</span></div>
+        </div>
+        <div class="brand-sub">Browser reimplementation &middot; <span id="brand-ver"></span></div>
+      </header>
+
+      <main>
+        <!-- 1. main: two choices + options -->
+        <section class="page on" id="pg-main">
+          <div class="cards">
+            <button class="big card" id="btn-single">
+              <span class="icon"><canvas data-tex="MnKinopioNXOn_00^l" data-pkg="mn_TopMenuNX_00" hidden></canvas>
+                <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="24" r="18" fill="#fff" stroke="#061a44" stroke-width="3"/><circle cx="22" cy="18" r="5" fill="#e52521"/><circle cx="40" cy="14" r="5" fill="#e52521"/><circle cx="36" cy="30" r="4" fill="#e52521"/><path d="M18 42h28l-3 16H21z" fill="#ffd7b0" stroke="#061a44" stroke-width="3"/></svg></span>
+              <span class="text"><span class="title mk-title">SINGLEPLAYER</span>
+                <span class="desc">Grand Prix against 11 CPU racers: pick a class, your racer and kart, then a cup.</span></span>
+              <span class="arrow">&#10148;</span>
+            </button>
+            <button class="big card online" id="btn-online">
+              <span class="icon"><canvas data-tex="MnKinopioNXOn_01^l" data-pkg="mn_TopMenuNX_00" hidden></canvas>
+                <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="22" cy="24" r="14" fill="#fff" stroke="#061a44" stroke-width="3"/><circle cx="44" cy="22" r="14" fill="#fff" stroke="#061a44" stroke-width="3"/><circle cx="16" cy="19" r="4" fill="#1b63d6"/><circle cx="27" cy="16" r="4" fill="#1b63d6"/><circle cx="40" cy="15" r="4" fill="#3dc24a"/><circle cx="50" cy="20" r="4" fill="#3dc24a"/><path d="M10 40h22l-3 16H13zM34 38h22l-3 16H37z" fill="#ffd7b0" stroke="#061a44" stroke-width="3"/></svg></span>
+              <span class="text"><span class="title mk-title">ONLINE</span>
+                <span class="desc">Race friends in a room: share a 6-letter code or join a public room on this server.</span></span>
+              <span class="arrow">&#10148;</span>
+            </button>
+          </div>
+
+          <!-- Ad rows (www/ads.js): only on the menu, never over a race. Each row fits as many
+               300x250 tiles as its width allows; the race's perimeter ring is built by ads.js too. -->
+          <div class="ad-row"><div class="ad-slot" data-ad="banner"></div></div>
+
+          <div class="row unblocked-row"><button class="small" id="btn-unblocked" title="sites.google.com/view/mariokart8online">Unblocked version &#10148;</button></div>
+
+          <details class="options" id="options" open>
+            <summary>
+              <svg class="gear" viewBox="0 0 24 24" aria-hidden="true"><path fill="#ffd400" stroke="#061a44" stroke-width="1.5" d="M12 2l2 3 3.5-.8.8 3.5 3 2-2 3 .8 3.5-3.5.8-2 3-3-2-3 2-2-3-3.5-.8.8-3.5-2-3 2-3L4.5 4.2 8 5z"/><circle cx="12" cy="12" r="3.5" fill="#061a44"/></svg>
+              <span>Options</span>
+              <span class="hint">face photo &middot; live camera &middot; sound</span>
+              <span class="chev">&#9662;</span>
+            </summary>
+            <div class="opt-grid">
+              <fieldset id="face-box">
+                <legend>Face photo (optional)</legend>
+                <div class="face-wrap">
+                  <canvas id="face-preview" width="256" height="256"></canvas>
+                  <video id="face-video" playsinline muted></video>
+                  <div class="controls">
+                    <div class="row">
+                      <button class="small" id="face-cam">Use camera</button>
+                      <button class="small" id="face-shoot" hidden>Take photo</button>
+                      <button class="small" id="face-upload">Upload image</button>
+                      <button class="small" id="face-clear">Clear</button>
+                      <input type="file" id="face-file" accept="image/*" hidden>
+                    </div>
+                    <div class="row"><label for="face-zoom">zoom</label> <input type="range" id="face-zoom" min="0.2" max="3" step="0.01" value="1"> <span class="note">drag the circle to move it</span></div>
+                    <button class="small toggle" id="face-live" aria-pressed="false">Live camera face: off</button>
+                    <p class="note">Your photo goes on your driver's face and stays in this browser; in online rooms it is sent only to the players in your room.
+                      Live camera (off by default) moves your driver's face with your camera and streams it directly to your room while it's on.</p>
+                    <p class="err" id="face-err"></p>
+                  </div>
+                </div>
+              </fieldset>
+              <fieldset id="sound-box">
+                <legend>Sound</legend>
+                <div class="vol"><label for="vol-music">Music</label> <input type="range" id="vol-music" min="0" max="100" step="5" value="80"></div>
+                <div class="vol"><label for="vol-sfx">Sound effects</label> <input type="range" id="vol-sfx" min="0" max="100" step="5" value="80"></div>
+                <div class="vol"><label for="vol-voice">Voices</label> <input type="range" id="vol-voice" min="0" max="100" step="5" value="80"></div>
+                <div class="row"><label><input type="checkbox" id="vol-mute"> Mute</label></div>
+                <p class="note">Sound starts after your first click or key press (browser rule). Saved in this browser.</p>
+              </fieldset>
+            </div>
+          </details>
+        </section>
+
+        <!-- 2. class -->
+        <section class="page" id="pg-class">
+          <h2 class="mk-title"><span class="step">STEP 1 OF 4</span> Choose a class</h2>
+          <div class="classes">
+            <button class="big" data-cc="50"><span class="icon"><canvas data-tex="ym_ClassIcon050_00^l" data-pkg="mn_GrprClassSlct_00" hidden></canvas><span class="shield">50</span></span>
+              <span class="text"><span class="title mk-title">50cc</span><span class="desc">Relaxed - learn the tracks</span></span></button>
+            <button class="big" data-cc="100"><span class="icon"><canvas data-tex="ym_ClassIcon100_00^l" data-pkg="mn_GrprClassSlct_00" hidden></canvas><span class="shield">100</span></span>
+              <span class="text"><span class="title mk-title">100cc</span><span class="desc">Standard speed</span></span></button>
+            <button class="big" data-cc="150"><span class="icon"><canvas data-tex="ym_ClassIcon150_00^l" data-pkg="mn_GrprClassSlct_00" hidden></canvas><span class="shield">150</span></span>
+              <span class="text"><span class="title mk-title">150cc</span><span class="desc">The classic race - fast and tough</span></span></button>
+            <button class="big" data-cc="200"><span class="icon"><canvas data-tex="ym_ClassIcon200_00^l" data-pkg="mn_GrprClassSlct_00" hidden></canvas><span class="shield c200">200</span></span>
+              <span class="text"><span class="title mk-title">200cc</span><span class="desc">Flat out - brake for the corners</span></span></button>
+          </div>
+          <p class="note">Next: the game's own character, kart and cup screens.</p>
+          <div class="foot"><button class="small back" data-go="main">&#9664; Back</button></div>
+        </section>
+
+        <!-- 3. online: create / join -->
+        <section class="page" id="pg-online">
+          <h2 class="mk-title">Online <span class="pill" id="net-status">not connected</span></h2>
+          <div class="name-row"><label for="net-name">Your name</label> <input type="text" id="net-name" maxlength="16" size="14" placeholder="Player"></div>
+          <div class="online-grid">
+            <div class="panel">
+              <h3>Host a room</h3>
+              <button class="big primary" id="btn-create">CREATE ROOM <span class="arrow">&#10148;</span></button>
+              <div class="row"><label><input type="checkbox" id="create-public"> List my room publicly</label></div>
+              <p class="note">You get a 6-letter code to share. Everyone picks their racer in the room; you pick the course and start.</p>
+            </div>
+            <div class="panel">
+              <h3>Join a friend</h3>
+              <div class="join-row"><input type="text" id="join-code" placeholder="ROOM CODE" maxlength="12" size="10" autocomplete="off" autocapitalize="characters" spellcheck="false">
+                <button class="small" id="btn-join">Join</button></div>
+              <p class="note">Type the code your friend shared.</p>
+            </div>
+          </div>
+          <fieldset>
+            <legend>Public rooms <button class="small" id="btn-rooms-refresh">refresh</button></legend>
+            <ul class="rooms" id="public-rooms"></ul>
+            <p class="note" id="public-rooms-note">loading...</p>
+          </fieldset>
+          <p class="err" id="online-err"></p>
+          <div class="foot"><button class="small back" data-go="main">&#9664; Back</button></div>
+        </section>
+
+        <!-- 4. room (lobby) -->
+        <section class="page" id="pg-room">
+          <div class="room-head">
+            <h2 class="mk-title">Room</h2>
+            <div class="code-wrap"><span class="code" id="room-code">----</span> <button class="small" id="btn-copy">Copy code</button></div>
+            <p class="note" id="room-settings"></p>
+          </div>
+          <div class="room-grid">
+            <div>
+              <div class="panel">
+                <h3>Players</h3>
+                <ul class="players" id="room-players"></ul>
+              </div>
+              <div id="room-host">
+                <div class="panel">
+                  <h3>Race settings (you are the host)</h3>
+                  <div class="host-grid">
+                    <label for="room-course">Course</label><select id="room-course"></select>
+                    <label for="room-class">Class</label><select id="room-class"><option value="0">50cc</option><option value="1">100cc</option>
+                      <option value="2" selected>150cc</option><option value="3">200cc</option></select>
+                    <label class="full"><input type="checkbox" id="room-public"> Public room (listed for anyone on this server)</label>
+                  </div>
+                  <button class="big go" id="btn-room-start">START RACE</button>
+                  <p class="note" id="room-start-note"></p>
+                </div>
+              </div>
+              <div class="wait-banner" id="room-wait">Waiting for the host to start the race...</div>
+              <div class="row" id="room-ready-row"><button class="big primary" id="btn-ready">I'M READY</button></div>
+            </div>
+            <div>
+              <fieldset>
+                <legend>Your racer</legend>
+                <div class="racer-grid">
+                  <label for="room-name">Name</label><input type="text" id="room-name" maxlength="16" size="14">
+                  <label for="room-driver">Driver</label><select id="room-driver"></select>
+                  <label for="room-body">Body</label><select id="room-body"></select>
+                  <label for="room-tire">Tires</label><select id="room-tire"></select>
+                  <label for="room-glider">Glider</label><select id="room-glider"></select>
+                </div>
+              </fieldset>
+              <details class="options" id="room-options" open>
+                <summary>
+                  <svg class="gear" viewBox="0 0 24 24" aria-hidden="true"><path fill="#ffd400" stroke="#061a44" stroke-width="1.5" d="M12 2l2 3 3.5-.8.8 3.5 3 2-2 3 .8 3.5-3.5.8-2 3-3-2-3 2-2-3-3.5-.8.8-3.5-2-3 2-3L4.5 4.2 8 5z"/><circle cx="12" cy="12" r="3.5" fill="#061a44"/></svg>
+                  <span>Options</span><span class="hint">live camera &middot; voice chat</span><span class="chev">&#9662;</span>
+                </summary>
+                <div class="opt-grid">
+                  <fieldset>
+                    <legend>Live camera</legend>
+                    <div class="row"><button class="small toggle" id="room-live" aria-pressed="false">Live camera face: off</button></div>
+                    <p class="note">Streams your camera directly to the players in your room while it's on.</p>
+                  </fieldset>
+                  <div id="voice-mount"></div>
+                </div>
+              </details>
+            </div>
+          </div>
+          <p class="err" id="room-err"></p>
+          <div class="foot"><button class="small back" id="btn-leave">&#9664; Leave room</button></div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <footer class="under" aria-hidden="true">
+    <div class="cap l"><kbd>B</kbd> Back</div>
+    <div class="hint">Arrows / D-pad move &middot; Enter / A select &middot; Esc / B back</div>
+    <div class="cap r"><kbd>A</kbd> OK</div>
+  </footer>
+</div>
+<!-- Touch controls (www/mobile.js, www/mobile.css): shown on touch screens while the game is up. -->
+<div id="touch" hidden data-mode="none">
+  <div id="t-gesture"></div>
+  <div id="t-zone"><div id="t-base" hidden><div id="t-knob"></div></div><div id="t-hint">steer: slide here</div></div>
+  <div class="cluster race">
+    <button class="tb look" type="button" data-look>look<small>back</small></button>
+    <button class="tb item" type="button" data-bits="256">L<small>item</small></button>
+    <button class="tb drift" type="button" data-bits="512">R<small>drift</small></button>
+    <button class="tb b" type="button" data-bits="32">B<small>brake</small></button>
+    <button class="tb a" type="button" data-bits="16">A<small>go</small></button>
+  </div>
+  <div class="mstick" id="t-mstick" aria-label="menu stick"><div class="mknob" id="t-mknob"></div></div>
+  <div class="cluster menu">
+    <button class="tb b" type="button" data-bits="32">B<small>back</small></button>
+    <button class="tb a" type="button" data-bits="16">A<small>OK</small></button>
+  </div>
+  <div class="top">
+    <button class="tb small" type="button" data-bits="64" id="t-pause">+ pause</button>
+  </div>
+</div>
+<div id="rotate" aria-live="polite"><div class="phone"></div><div>Turn your phone sideways</div><small>The race plays in landscape.</small></div>
+<div id="help">Menus: arrows/WASD move, Enter/Space = A, Backspace/Esc = B, +/- keys, Q/E = L/R<br>
+Race: Space/Enter/W = A accelerate, Backspace/S = B brake, arrows/AD steer, E/Shift = R drift, Q/Ctrl = L item, Esc/+ pause<br>
+Gamepad (standard mapping): A/B/X/Y, L/R/ZL/ZR, +/-, d-pad and left stick</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

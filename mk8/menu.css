@@ -1,0 +1,450 @@
+/* The page's own front menu, styled after Mario Kart 8 Deluxe's menus: deep blue checkered
+   backgrounds, glossy white ribbons that turn yellow when selected, thick rounded type with a
+   dark outline, black guide bars with orange A / B prompts. All of it is CSS; once the user's
+   romfs is loaded, www/brand.js draws the game's own logo, backgrounds and icons into the
+   canvases (nothing from the game is stored in the repo). System fonts only: the page must
+   work offline and as a single file. */
+
+:root {
+  --mk-navy: #061a44;
+  --mk-blue-deep: #0a2f7a;
+  --mk-blue: #1b63d6;
+  --mk-blue-light: #4e9df5;
+  --mk-sky: #8ad0ff;
+  --mk-yellow: #ffd400;
+  --mk-yellow-deep: #ffa800;
+  --mk-orange: #ff8a00;
+  --mk-red: #e52521;
+  --mk-green: #3dc24a;
+  --mk-white: #ffffff;
+  --mk-silver: #cfd9ea;
+  --mk-ink: #0b2458;
+  --mk-text: #ffffff;
+  --mk-bar: #0c0f1c;
+  --outline: 0 0 0 3px var(--mk-navy);
+  --font: "Nunito", "Varela Round", "Quicksand", "Arial Rounded MT Bold", "Trebuchet MS", "Segoe UI",
+    "Noto Sans", "DejaVu Sans", system-ui, -apple-system, sans-serif;
+  --radius: 18px;
+  --shadow: 0 10px 24px rgba(0, 0, 0, 0.35), 0 2px 0 rgba(255, 255, 255, 0.35) inset;
+  --check-url: none;
+  --mono-url: none;
+  --focus: 0 0 0 4px var(--mk-yellow), 0 0 0 9px rgba(255, 212, 0, 0.35);
+}
+
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #eee; font-family: var(--font); }
+
+/* ---- the game canvas: 16:9, letterboxed (sized by main.js) ---- */
+#gl { display: block; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; touch-action: none; outline: none; }
+
+/* ---- status toast (loading progress, errors before the menu exists) ---- */
+#ui { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 40; display: flex; flex-wrap: nowrap;
+  gap: 8px 12px; align-items: center; justify-content: center; max-width: min(92vw, 720px);
+  padding: 10px 18px; border-radius: 999px; background: rgba(6, 26, 68, 0.88); color: #fff;
+  border: 3px solid rgba(255, 255, 255, 0.85); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); font-weight: 800; font-size: 15px;
+  backdrop-filter: blur(6px); }
+#ui::before { content: ""; width: 14px; height: 14px; border-radius: 50%; flex: none;
+  border: 3px solid var(--mk-yellow); border-right-color: transparent; animation: spin 0.9s linear infinite; }
+#ui.done::before, body.menus #ui::before { animation: none; border-color: var(--mk-green); }
+#ui button, #ui select { font: inherit; font-weight: 800; padding: 6px 14px; border-radius: 999px; border: 2px solid #fff;
+  background: var(--mk-yellow); color: var(--mk-navy); cursor: pointer; }
+#ui select { background: #fff; }
+#status { white-space: pre-wrap; text-align: center; }
+#hud { position: fixed; bottom: 16px; left: 16px; font-size: 22px; font-weight: 700; text-shadow: 0 2px 4px #000;
+  font-variant-numeric: tabular-nums; white-space: pre; }
+#help { position: fixed; bottom: 16px; right: 16px; font-size: 12px; opacity: 0.7; text-align: right; }
+.hidden { display: none !important; }
+
+/* Dev kart panel (?course= only). */
+#kartsel { position: fixed; top: 64px; left: 12px; background: rgba(0, 0, 0, 0.55); padding: 8px 12px; border-radius: 8px;
+  font-size: 13px; display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center;
+  max-width: min(360px, calc(100vw - 48px)); }
+#kartsel select { font: inherit; padding: 2px 4px; max-width: 100%; }
+#kartsel .bars { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr auto; gap: 2px 6px; margin-top: 4px; }
+#kartsel .bar { height: 8px; background: rgba(255, 255, 255, 0.15); border-radius: 4px; align-self: center; }
+#kartsel .bar > div { height: 100%; background: var(--mk-red); border-radius: 4px; }
+body.racing #kartsel { display: none; }
+body.menus #ui, body.menus #kartsel, body.menus #hud, body.menus #help { display: none !important; }
+body.uihud #hud { display: none; }
+
+/* ---- Online: connection / desync messages, names over the other players' karts ---- */
+#net-banner { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 20; padding: 8px 18px;
+  background: var(--mk-red); color: #fff; font: 800 16px var(--font); border: 3px solid #fff; border-radius: 999px; max-width: 90vw;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4); }
+#live-indicator { position: fixed; top: 10px; right: 10px; z-index: 30; padding: 6px 12px; background: #d00; color: #fff;
+  font: 800 14px var(--font); border: 2px solid #fff; border-radius: 16px; cursor: pointer; animation: livepulse 1.2s infinite; }
+#live-indicator[hidden] { display: none; }
+/* Fullscreen toggle (index.html #fs-btn, wired by www/main.js): desktop only -- touch devices use the
+   game's own fullscreen on race start (www/mobile.js). */
+#fs-btn { position: fixed; top: 10px; right: 10px; z-index: 31; width: 34px; height: 34px; padding: 0; box-sizing: border-box;
+  border: 2px solid rgba(255, 255, 255, 0.5); border-radius: 9px; cursor: pointer; background: rgba(6, 26, 68, 0.62); color: #fff;
+  font: 800 17px/1 var(--font); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+#fs-btn:hover, #fs-btn:focus-visible { background: rgba(6, 26, 68, 0.9); border-color: #fff; }
+#fs-btn[aria-pressed="true"] { background: var(--mk-red); border-color: #fff; }
+#fs-btn[hidden] { display: none; }
+@media (pointer: coarse) { #fs-btn { display: none; } }
+/* Keep the live-camera pill clear of the button (both only appear on fine pointers). */
+@media (pointer: fine) { body #live-indicator { right: 54px; } }
+/* One-time "what's new" notice (index.html #news, wired by www/main.js): shown once per browser. */
+#news { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: rgba(2, 8, 22, 0.72); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+#news[hidden] { display: none; }
+#news .news-card { width: min(560px, 100%); max-height: 86vh; overflow: auto; padding: 22px 24px; border-radius: 14px;
+  background: #0a1c3f; color: #e6eefc; border: 2px solid rgba(255, 255, 255, 0.18); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5); }
+#news h2 { margin: 0 0 10px; font-size: 22px; color: #ffd400; }
+#news p { margin: 0 0 10px; }
+#news ul { margin: 0 0 18px; padding-left: 20px; }
+#news li { margin: 5px 0; line-height: 1.35; }
+#news button { display: block; margin: 0 auto; padding: 10px 22px; border: 0; border-radius: 999px; cursor: pointer;
+  background: var(--mk-red, #e52521); color: #fff; font: 800 16px var(--font); }
+#news button:hover, #news button:focus-visible { filter: brightness(1.1); }
+@keyframes livepulse { 50% { opacity: 0.65; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+#kart-tags { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+#kart-tags span { position: absolute; transform: translate(-50%, -100%); font: 800 15px var(--font); color: #fff;
+  text-shadow: 0 0 3px #000, 0 1px 2px #000; white-space: nowrap; }
+body.home #kart-tags { display: none; }
+
+/* ====================================================================================== */
+/* The menu backdrop, shared by the home menu and its pages.                               */
+/* ====================================================================================== */
+.mk-bg { position: absolute; inset: 0; overflow: hidden; z-index: 0; pointer-events: none;
+  background: radial-gradient(120% 90% at 70% 10%, var(--mk-blue) 0%, var(--mk-blue-deep) 45%, var(--mk-navy) 100%); }
+/* Diagonal stripes, slowly sliding (the game's menu backgrounds drift the same way). */
+.mk-bg .stripes { position: absolute; inset: -50%; opacity: 0.16;
+  background: repeating-linear-gradient(-30deg, transparent 0 56px, rgba(255, 255, 255, 0.5) 56px 64px, transparent 64px 120px);
+  animation: slide 24s linear infinite; }
+/* Checker tiles fading out towards the bottom (real `tc_MtCheck` tile once loaded). */
+.mk-bg .check { position: absolute; inset: 0; opacity: 0.12;
+  background-image: var(--check-url, linear-gradient(45deg, #fff 25%, transparent 25% 75%, #fff 75%),
+    linear-gradient(45deg, #fff 25%, transparent 25% 75%, #fff 75%));
+  background-size: 96px 96px; background-position: 0 0, 48px 48px;
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 70%); mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 70%); }
+.mk-bg .check.real { background-position: 0 0; }
+/* The MARIO KART monogram watermark (real `ym_ModeMonogram` once loaded). */
+.mk-bg .mono { position: absolute; inset: 0; opacity: 0.09; background-image: var(--mono-url, none); background-size: 420px 420px;
+  background-position: -60px 40px; }
+/* Real game art: title background + character art, faded in when decoded. */
+.mk-bg canvas { position: absolute; opacity: 0; transition: opacity 0.9s ease; }
+.mk-bg canvas.ready { opacity: 1; }
+.mk-bg canvas.art { inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 60% 50%; }
+.mk-bg canvas.art.ready ~ .stripes, .mk-bg canvas.art.ready ~ .check, .mk-bg canvas.art.ready ~ .mono { opacity: 0.05; }
+.mk-bg .shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(6, 26, 68, 0.86) 0%, rgba(6, 26, 68, 0.74) 46%, rgba(6, 26, 68, 0.35) 100%),
+  linear-gradient(180deg, rgba(6, 26, 68, 0.25), rgba(6, 26, 68, 0.6)); }
+.mk-bg canvas.hero { right: -2vw; bottom: -4vh; height: 92vh; width: auto; object-fit: contain; object-position: right bottom;
+  filter: drop-shadow(0 20px 30px rgba(0, 0, 0, 0.5)); }
+/* Two sets of art: the Single Player one and the online one (crossfade by page). */
+#home[data-page="online"] .mk-bg canvas.set-single.ready, #home[data-page="room"] .mk-bg canvas.set-single.ready { opacity: 0; }
+#home:not([data-page="online"]):not([data-page="room"]) .mk-bg canvas.set-online { opacity: 0; }
+@keyframes slide { to { transform: translate(140px, 0); } }
+
+/* ====================================================================================== */
+/* Type                                                                                    */
+/* ====================================================================================== */
+.mk-title { font-weight: 900; letter-spacing: 0.02em; color: #fff; line-height: 1;
+  text-shadow: 0 3px 0 var(--mk-navy), 0 -2px 0 var(--mk-navy), 2px 0 0 var(--mk-navy), -2px 0 0 var(--mk-navy),
+    2px 3px 0 var(--mk-navy), -2px 3px 0 var(--mk-navy), 0 6px 14px rgba(0, 0, 0, 0.5); }
+
+/* ====================================================================================== */
+/* The home menu                                                                           */
+/* ====================================================================================== */
+#home { position: fixed; inset: 0; display: none; z-index: 10; color: #fff; overflow: hidden; }
+body.home #home { display: block; }
+#home .scroll { position: absolute; inset: 0 0 58px 0; overflow-y: auto; overflow-x: hidden; z-index: 1;
+  padding: 18px clamp(16px, 4vw, 56px) 24px; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.5) transparent; }
+#home .frame { max-width: 1180px; margin: 0 auto; display: grid; grid-template-rows: auto 1fr; min-height: 100%; }
+
+/* Logo. */
+#home .brand { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 12px; transition: margin 0.2s ease; }
+/* Sub-pages: a smaller logo leaves room for their content (the game's sub-screens have none). */
+#home:not([data-page="main"]) #brand-logo { height: clamp(56px, 8vw, 76px); }
+#home:not([data-page="main"]) .logo-css { transform: scale(0.6); transform-origin: left bottom; margin-bottom: -28px; }
+#home:not([data-page="main"]) .brand { margin-bottom: 6px; }
+#home:not([data-page="main"]) .brand-sub { display: none; }
+#home .logo { position: relative; display: inline-block; }
+#brand-logo { display: block; height: clamp(84px, 15vw, 150px); width: auto; filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.55)); }
+#brand-logo[hidden] { display: none; }
+/* CSS stand-in for the logo (before the romfs is loaded). */
+.logo-css { display: grid; grid-template-columns: auto auto; grid-template-rows: auto auto; column-gap: 10px; align-items: center;
+  text-transform: uppercase; user-select: none; }
+.logo-css[hidden] { display: none; }
+.logo-css .l1 { grid-column: 1; font-size: clamp(30px, 6vw, 58px); font-weight: 900; letter-spacing: -0.01em; color: #fff; line-height: 0.95;
+  text-shadow: 0 2px 0 #555, 0 4px 0 #333, 0 6px 0 #111, 0 8px 10px rgba(0, 0, 0, 0.6); }
+.logo-css .l2 { grid-column: 1; justify-self: end; font-size: clamp(20px, 4vw, 38px); font-weight: 900; letter-spacing: 0.1em; line-height: 1;
+  padding: 2px 10px; color: #fff;
+  background: linear-gradient(90deg, #ff3b30, #ffb400, #35d04a, #2fb3ff, #a65cff); -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; filter: drop-shadow(0 0 2px #000) drop-shadow(0 2px 0 #000); }
+.logo-css .l8 { grid-column: 2; grid-row: 1 / span 2; font-size: clamp(72px, 14vw, 140px); font-weight: 900; line-height: 0.8;
+  background: linear-gradient(170deg, #5ec8ff 0%, #2a7fff 45%, #ff2d6f 60%, #ff5b3a 100%);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 3px #fff) drop-shadow(0 6px 10px rgba(0, 0, 0, 0.55)); }
+#home .brand-sub { font-size: 12px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; color: #bcd3ff; opacity: 0.9;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); padding-left: 4px; }
+
+/* Pages. */
+#home .page { display: none; animation: pagein 0.32s cubic-bezier(0.2, 1, 0.3, 1) both; }
+#home .page.on { display: block; }
+@keyframes pagein { from { opacity: 0; transform: translateX(28px); } }
+#home h2 { font-size: clamp(26px, 4.5vw, 40px); margin: 6px 0 14px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+#home h2 .step { font-size: 14px; letter-spacing: 0.14em; color: var(--mk-yellow); text-shadow: 0 2px 0 var(--mk-navy); }
+#home [hidden] { display: none !important; }
+#home p { margin: 6px 0; }
+#home .note { font-size: 14px; color: #d7e3fb; line-height: 1.4; }
+#home .err { color: #fff; font-weight: 800; font-size: 14px; }
+#home .err:not(:empty) { display: inline-block; background: var(--mk-red); border: 2px solid #fff; border-radius: 10px; padding: 4px 10px; margin-top: 8px; }
+#home .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#home label { font-weight: 800; }
+
+/* Buttons: glossy white ribbon, yellow when hovered / focused, slanted ends like the game's. */
+#home button { font-family: var(--font); cursor: pointer; }
+#home button.big { position: relative; display: flex; align-items: center; gap: 16px; width: 100%; margin: 10px 0; padding: 14px 22px;
+  min-height: 64px; text-align: left; font-size: 24px; font-weight: 900; letter-spacing: 0.02em; color: var(--mk-ink);
+  background: linear-gradient(180deg, #ffffff 0%, #eef3fb 48%, #cfd9ea 52%, #e9eef8 100%);
+  border: 3px solid var(--mk-navy); border-radius: 16px; box-shadow: var(--shadow);
+  transition: transform 0.12s ease, background 0.12s ease, box-shadow 0.12s ease; }
+#home button.big:hover, #home button.big:focus-visible, #home.kb button.big:focus {
+  background: linear-gradient(180deg, #fff3a6 0%, var(--mk-yellow) 48%, var(--mk-yellow-deep) 52%, #ffd04a 100%);
+  transform: translateX(6px) scale(1.015); box-shadow: 0 14px 28px rgba(0, 0, 0, 0.4), 0 2px 0 rgba(255, 255, 255, 0.6) inset; outline: none; }
+#home button.big:active { transform: scale(0.985); }
+#home button.big:disabled { opacity: 0.55; cursor: not-allowed; transform: none; filter: saturate(0.4); }
+#home button.big .arrow { margin-left: auto; font-size: 28px; opacity: 0.55; transition: transform 0.12s ease, opacity 0.12s ease; }
+#home button.big:hover .arrow, #home button.big:focus-visible .arrow { opacity: 1; transform: translateX(6px); }
+#home button.big.primary { background: linear-gradient(180deg, #fff3a6 0%, var(--mk-yellow) 48%, var(--mk-yellow-deep) 52%, #ffd04a 100%); justify-content: center; text-align: center; }
+#home button.big.primary:hover, #home button.big.primary:focus-visible, #home.kb button.big.primary:focus {
+  background: linear-gradient(180deg, #d9ffd9 0%, #58e067 48%, var(--mk-green) 52%, #6ce07a 100%); transform: scale(1.02); }
+#home button.big.go { background: linear-gradient(180deg, #d9ffd9 0%, #58e067 48%, var(--mk-green) 52%, #6ce07a 100%); justify-content: center; text-align: center; font-size: 30px; }
+#home button.big.go:hover, #home button.big.go:focus-visible, #home.kb button.big.go:focus { background: linear-gradient(180deg, #fff3a6 0%, var(--mk-yellow) 48%, var(--mk-yellow-deep) 52%, #ffd04a 100%); transform: scale(1.02); }
+
+#home button.small, #home select, #home input[type=text] { font-family: var(--font); font-size: 15px; font-weight: 800; padding: 7px 14px;
+  border: 2px solid var(--mk-navy); border-radius: 999px; background: #fff; color: var(--mk-ink); box-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
+  margin: 2px 0; transition: transform 0.1s ease, background 0.1s ease; }
+#home select { padding-right: 28px; appearance: none; -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--mk-ink) 50%), linear-gradient(135deg, var(--mk-ink) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 55%, calc(100% - 10px) 55%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+#home input[type=text] { min-width: 0; }
+#home input[type=text]::placeholder { color: #7a8bb0; font-weight: 700; }
+#home button.small:hover, #home button.small:focus-visible, #home.kb button.small:focus { background: var(--mk-yellow); transform: translateY(-1px); outline: none; }
+#home button.small:disabled { opacity: 0.5; cursor: not-allowed; }
+#home button.back { background: var(--mk-bar); color: #fff; border-color: #fff; }
+#home button.back:hover, #home button.back:focus-visible, #home.kb button.back:focus { background: #2a2f45; color: var(--mk-yellow); }
+#home .foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+#home input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--mk-yellow); vertical-align: -4px; margin-right: 6px; }
+#home input[type=range] { accent-color: var(--mk-yellow); height: 28px; }
+#home :focus-visible, #home.kb :focus { outline: none; box-shadow: var(--focus); border-radius: 12px; }
+#home button.big:focus-visible, #home.kb button.big:focus { box-shadow: var(--focus), 0 14px 28px rgba(0, 0, 0, 0.4); }
+
+/* Panels (the game's translucent white boards). */
+#home fieldset, #home .panel { border: 3px solid rgba(255, 255, 255, 0.85); border-radius: 20px; margin: 14px 0 0; padding: 12px 16px 14px;
+  background: rgba(6, 26, 68, 0.55); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); backdrop-filter: blur(4px); min-width: 0; }
+#home legend, #home .panel > h3 { font-size: 15px; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mk-yellow);
+  padding: 0 10px; margin: 0; text-shadow: 0 2px 0 var(--mk-navy), 0 0 8px rgba(6, 26, 68, 0.9); }
+#home legend { background: rgba(6, 26, 68, 0.75); border-radius: 999px; }
+#home .panel > h3 { margin: -2px 0 10px; padding: 0; }
+
+/* ---- main page: the two big choices ---- */
+#home .cards { display: grid; grid-template-columns: 1fr; gap: 16px; margin: 6px 0 4px; max-width: 760px; }
+#home details.options { max-width: 760px; }
+#home[data-page="main"] .page.on { padding-right: clamp(0px, 20vw, 300px); }
+#home[data-page="main"] .cards, #home[data-page="main"] details.options { max-width: none; }
+#home .cards .card { flex-direction: row; align-items: center; margin: 0; padding: 18px 20px; min-height: 128px; gap: 18px; border-radius: 22px; }
+#home .card .icon { flex: none; width: 92px; height: 84px; display: grid; place-items: center; }
+#home .card .icon canvas, #home .card .icon svg { width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 4px 4px rgba(0, 0, 0, 0.35)); }
+#home .card .icon canvas[hidden] { display: none; }
+#home .card .text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#home .card .title { font-size: clamp(24px, 3.6vw, 34px); line-height: 1; }
+#home .card .desc { font-size: 14px; font-weight: 700; color: #3b4f80; line-height: 1.3; letter-spacing: 0; }
+#home .card.online .desc { color: #3b4f80; }
+#home .card .badge { position: absolute; top: -12px; right: 14px; background: var(--mk-red); color: #fff; font-size: 12px; font-weight: 900;
+  letter-spacing: 0.1em; padding: 3px 10px; border-radius: 999px; border: 2px solid #fff; }
+
+/* ---- Options drawer ---- */
+#home details.options { margin-top: 16px; border: 3px solid rgba(255, 255, 255, 0.5); border-radius: 20px; background: rgba(6, 26, 68, 0.45);
+  transition: background 0.2s ease; }
+#home details.options[open] { background: rgba(6, 26, 68, 0.6); border-color: rgba(255, 255, 255, 0.85); }
+#home details.options summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 12px; padding: 12px 18px; font-weight: 900;
+  font-size: 18px; border-radius: 16px; }
+#home details.options summary::-webkit-details-marker { display: none; }
+#home details.options summary .gear { width: 28px; height: 28px; flex: none; }
+#home details.options summary .hint { font-size: 13px; font-weight: 700; color: #c9d6f2; letter-spacing: 0; }
+#home details.options summary .chev { margin-left: auto; transition: transform 0.2s ease; font-size: 18px; }
+#home details.options[open] summary .chev { transform: rotate(180deg); }
+#home .opt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 0 14px; padding: 0 14px 14px; }
+#home .opt-grid fieldset { margin-top: 4px; }
+
+/* Face photo. */
+#face-preview { display: block; width: 180px; height: 180px; background: #0e2a66; border: 3px solid #fff; border-radius: 50%; margin: 8px 0;
+  touch-action: none; cursor: grab; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); }
+#face-video { display: none; }
+#face-zoom { width: 160px; }
+#home .face-wrap { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+#home .face-wrap .controls { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; flex: 1; min-width: 180px; }
+#home .toggle[aria-pressed="true"] { background: var(--mk-green); color: #fff; }
+
+/* Sound sliders. */
+#home .vol { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 10px; margin: 4px 0; }
+#home .vol input[type=range] { width: 100%; max-width: 260px; }
+
+/* ---- class page ---- */
+#home .classes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 14px; }
+#home .classes button.big { margin: 0; min-height: 96px; padding: 12px 18px; }
+#home .classes .icon { flex: none; width: 72px; height: 72px; display: grid; place-items: center; }
+#home .classes .icon canvas { width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 3px 3px rgba(0, 0, 0, 0.35)); }
+#home .classes .icon canvas[hidden] { display: none; }
+#home .classes .shield { width: 60px; height: 66px; display: grid; place-items: center; font-size: 20px; font-weight: 900; color: #fff;
+  background: linear-gradient(180deg, #4e9df5, #1b63d6); border: 3px solid #fff; border-radius: 12px 12px 30px 30px; text-shadow: 0 2px 0 var(--mk-navy); }
+#home .classes .shield.c200 { background: linear-gradient(180deg, #ff6b5e, var(--mk-red)); }
+#home .classes .text { display: flex; flex-direction: column; gap: 2px; }
+#home .classes .title { font-size: 30px; line-height: 1; }
+#home .classes .desc { font-size: 13px; font-weight: 700; color: #3b4f80; letter-spacing: 0; }
+
+/* ---- online page ---- */
+#home .online-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; align-items: start; }
+#home .name-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 4px 0 10px; }
+#home .name-row input { flex: 1; min-width: 160px; max-width: 360px; font-size: 18px; }
+#home .join-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+#home .join-row input { flex: 1; min-width: 140px; font-size: 22px; letter-spacing: 0.25em; text-transform: uppercase; text-align: center; font-family: ui-monospace, Menlo, Consolas, monospace; }
+#home .pill { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 800; padding: 4px 12px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15); border: 2px solid rgba(255, 255, 255, 0.5); }
+#home .pill::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--mk-yellow); box-shadow: 0 0 8px var(--mk-yellow); }
+#home .pill.ok::before { background: var(--mk-green); box-shadow: 0 0 8px var(--mk-green); }
+#home .pill.bad::before { background: var(--mk-red); box-shadow: 0 0 8px var(--mk-red); }
+#home ul.rooms { list-style: none; padding: 0; margin: 4px 0; max-height: 260px; overflow-y: auto; }
+#home ul.rooms li { display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 2px dashed rgba(255, 255, 255, 0.25); font-weight: 700; }
+#home ul.rooms li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+/* ---- room page ---- */
+#home .room-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; margin-bottom: 8px; }
+#home .room-head h2 { margin: 0; }
+#home .code-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#home .code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: clamp(34px, 7vw, 56px); font-weight: 900; letter-spacing: 0.12em;
+  background: var(--mk-bar); color: var(--mk-yellow); padding: 4px 18px; border-radius: 14px; border: 3px solid #fff; user-select: all;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45); line-height: 1.1; }
+#home .room-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+#home .room-grid .panel, #home .room-grid fieldset { margin-top: 10px; padding: 10px 14px 12px; }
+#home .room-grid .panel:first-child { margin-top: 0; }
+#home .room-grid fieldset:first-child { margin-top: 0; }
+#home #btn-room-start { margin: 8px 0 4px; min-height: 60px; }
+#home #room-start-note { margin: 2px 0 0; }
+#home ul.players li { min-height: 136px; padding: 10px 8px 8px; }
+#home ul.players { list-style: none; padding: 0; margin: 6px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+#home ul.players li { position: relative; display: grid; grid-template-rows: auto auto auto 1fr; justify-items: center; gap: 4px; padding: 12px 10px 10px;
+  background: linear-gradient(180deg, #ffffff 0%, #eef3fb 100%); color: var(--mk-ink); border: 3px solid var(--mk-navy); border-radius: 18px;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35); text-align: center; font-weight: 800; min-height: 150px; }
+#home ul.players li.me { border-color: var(--mk-yellow); box-shadow: 0 0 0 3px var(--mk-yellow), 0 8px 18px rgba(0, 0, 0, 0.35); }
+#home ul.players .pface { width: 64px; height: 64px; border-radius: 50%; border: 3px solid var(--mk-navy); background: linear-gradient(180deg, #4e9df5, #1b63d6);
+  display: grid; place-items: center; color: #fff; font-size: 26px; font-weight: 900; overflow: hidden; }
+#home ul.players .pface img { width: 100%; height: 100%; object-fit: cover; }
+#home ul.players .pname { font-size: 16px; line-height: 1.1; overflow-wrap: anywhere; }
+#home ul.players .pdrv { font-size: 12px; color: #3b4f80; }
+#home ul.players .ptags { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; align-self: end; }
+#home ul.players .tag { font-size: 11px; font-weight: 900; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+  background: #d9e1f2; color: var(--mk-ink); }
+#home ul.players .tag.ok { background: var(--mk-green); color: #fff; }
+#home ul.players .tag.wait { background: var(--mk-yellow); }
+#home ul.players .tag.host { background: var(--mk-red); color: #fff; }
+#home ul.players .tag.off { background: #666; color: #fff; }
+#home ul.players .voice-dot { position: absolute; top: 8px; left: 8px; margin: 0; }
+#home ul.players .voice-mute { position: absolute; top: 4px; right: 4px; padding: 2px 8px; font-size: 11px; box-shadow: none; }
+/* The host's kick control: red, armed once (see www/home.js kickButton). */
+#home ul.players .kick { background: var(--mk-red); border-color: #7d1410; color: #fff; font-size: 12px; padding: 3px 14px; margin: 0; }
+#home ul.players .kick:hover, #home ul.players .kick:focus-visible, #home.kb ul.players .kick:focus { background: #ff4b45; transform: translateY(-1px); }
+#home ul.players .kick.armed { background: var(--mk-yellow); color: var(--mk-ink); border-color: var(--mk-navy); }
+#home .racer-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: center; }
+#home .racer-grid select, #home .racer-grid input { width: 100%; box-sizing: border-box; }
+#home .wait-banner { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 14px 18px; border-radius: 16px;
+  background: rgba(255, 255, 255, 0.12); border: 3px dashed rgba(255, 255, 255, 0.6); font-weight: 900; font-size: 18px; }
+#home .wait-banner::before { content: ""; width: 18px; height: 18px; border-radius: 50%; border: 4px solid var(--mk-yellow); border-right-color: transparent;
+  animation: spin 1s linear infinite; flex: none; }
+/* Back from a race: a checkered flag instead of the spinner, until the player readies up. */
+#home .wait-banner.after { border-style: solid; border-color: var(--mk-green); background: rgba(61, 194, 74, 0.18); }
+#home .wait-banner.after::before { content: "\1F3C1"; width: auto; height: auto; border: 0; border-radius: 0; animation: none; font-size: 22px; line-height: 1; }
+#home .host-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: center; margin-bottom: 8px; }
+#home .host-grid select { width: 100%; box-sizing: border-box; }
+#home .host-grid .full { grid-column: 1 / -1; }
+#home #room-settings { font-weight: 800; color: #fff; text-shadow: 0 1px 0 var(--mk-navy), 0 2px 6px rgba(0, 0, 0, 0.7); }
+/* Content-dense pages: a darker backdrop behind the art. */
+#home[data-page="room"] .mk-bg .shade, #home[data-page="online"] .mk-bg .shade { background: linear-gradient(90deg, rgba(6, 26, 68, 0.9) 0%, rgba(6, 26, 68, 0.82) 50%, rgba(6, 26, 68, 0.55) 100%),
+  linear-gradient(180deg, rgba(6, 26, 68, 0.3), rgba(6, 26, 68, 0.65)); }
+#home[data-page="room"] .mk-bg canvas.hero.ready, #home[data-page="online"] .mk-bg canvas.hero.ready { opacity: 0.85; }
+#home #room-settings:not(:empty)::before { content: "\1F3C1  "; }
+
+/* ---- the guide bar at the bottom (B back / A OK) ---- */
+#home .under { position: absolute; left: 0; right: 0; bottom: 0; height: 58px; z-index: 2; pointer-events: none; display: flex; justify-content: space-between;
+  align-items: flex-end; }
+#home .under .cap { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 22px; background: var(--mk-bar); color: #fff; font-weight: 900;
+  font-size: 18px; border-top: 3px solid #fff; box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.4); }
+#home .under .cap.l { border-right: 3px solid #fff; border-top-right-radius: 14px; padding-right: 32px; clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 0 100%); }
+#home .under .cap.r { border-left: 3px solid #fff; border-top-left-radius: 14px; padding-left: 32px; clip-path: polygon(14px 0, 100% 0, 100% 100%, 0 100%); }
+#home .under kbd { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: #fff; color: var(--mk-bar);
+  font-family: var(--font); font-weight: 900; font-size: 15px; }
+#home .under .cap.r kbd, #home .under .cap.r { color: var(--mk-orange); }
+#home .under .cap.r kbd { background: var(--mk-orange); color: var(--mk-bar); }
+#home .under .cap.l kbd { background: var(--mk-orange); }
+#home .under .hint { font-size: 12px; font-weight: 800; color: #c9d6f2; padding: 0 10px 14px; text-align: center; flex: 1; text-shadow: 0 1px 2px #000; }
+
+/* Voice chat badge / dots (www/voice.js adds its own base styles; these restyle them). */
+#voice-indicator { font-family: var(--font) !important; }
+
+/* ---- phones ---- */
+@media (max-width: 720px) {
+  #home .scroll { padding: 12px 16px 20px; inset: 0 0 52px 0; }
+  #home[data-page="main"] .page.on { padding-right: 0; }
+  #home .brand { align-items: center; text-align: center; margin-bottom: 8px; }
+  #home:not([data-page="main"]) .logo-css { transform-origin: center bottom; }
+  #home .room-grid { grid-template-columns: 1fr; }
+  #home .cards .card { min-height: 104px; padding: 14px 16px; gap: 14px; }
+  #home .card .icon { width: 68px; height: 64px; }
+  #home button.big { font-size: 21px; padding: 12px 16px; }
+  #home .under .cap { height: 42px; font-size: 15px; padding: 0 14px; }
+  #home .under .cap.l { padding-right: 22px; }
+  #home .under .cap.r { padding-left: 22px; }
+  #home .under .hint { display: none; }
+  #home ul.players { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  .mk-bg canvas.hero { height: 60vh; right: -18vw; opacity: 0; }
+  .mk-bg canvas.hero.ready { opacity: 0.5; }
+  #home .code { letter-spacing: 0.08em; }
+}
+
+/* ---- motion ---- */
+@media (prefers-reduced-motion: reduce) {
+  .mk-bg .stripes, #ui::before, #home .wait-banner::before, #live-indicator { animation: none !important; }
+  #home .page { animation: none !important; }
+  #home button.big, #home button.small, .mk-bg canvas, #home details.options { transition: none !important; }
+  #home button.big:hover, #home button.big:focus-visible { transform: none; }
+}
+#home .unblocked-row { justify-content: center; margin: 4px 0 10px; }
+
+/* ---- ad tiles (www/ads.js): the creative is a fixed 300x250 iframe; every tile keeps that 6:5 box
+   and scales the creative with --k, so an ad is shown whole, never cropped. Menu rows sit in the
+   page flow; the race's perimeter ring (#ad-ring) tiles the bands main.js leaves around the canvas. ---- */
+.ad-tile { position: relative; overflow: hidden; flex: none; display: grid; place-items: center; }
+/* The loader's element is a block div wrapping a 300x250 iframe: pin it to that box, centred, and
+   scale the whole box to the tile (tiles keep the 6:5 aspect, so nothing is cropped). */
+.ad-tile > div { width: 300px; height: 250px; transform: scale(var(--k, 1)); transform-origin: center center; }
+
+#home .ad-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 16px 0 6px; }
+/* St. Jude proceeds banner (index.html #jude, wired by www/ads.js): small, quiet, dismissable. */
+#home .jude { display: flex; align-items: center; gap: 10px; margin: 0 auto 14px; padding: 7px 14px; border-radius: 999px;
+  max-width: 660px; background: rgba(6, 26, 68, 0.55); color: #cbd9f6; font-size: 13px; font-weight: 600; line-height: 1.3;
+  border: 1px solid rgba(255, 255, 255, 0.12); }
+#home .jude-text { flex: 1; text-align: center; }
+#home .jude-text strong { color: #8ce69a; font-weight: 800; }
+#home .jude-heart { flex: none; font-size: 14px; color: #ff9bb0; }
+#home .jude-close { flex: none; width: 22px; height: 22px; border: 0; border-radius: 50%; cursor: pointer;
+  background: rgba(255, 255, 255, 0.1); color: #cbd9f6; font-size: 11px; font-weight: 800; line-height: 1; }
+#home .jude-close:hover, #home .jude-close:focus-visible { background: rgba(255, 255, 255, 0.28); color: #fff; }
+#home .ad-slot { display: contents; }
+#home .ad-tile { width: 300px; height: 250px; border-radius: 6px; }
+#home .ad-tile:not(.filled) { border: 2px dashed rgba(255, 255, 255, 0.35); background: rgba(6, 26, 68, 0.45); }
+#home .ad-tile:not(.filled)::before { content: "Advertisement"; font-size: 11px; font-weight: 800; letter-spacing: 0.12em;
+  text-transform: uppercase; color: rgba(255, 255, 255, 0.5); }
+
+/* The perimeter ring of ads around the game (body.ad-gutters: desktop, wide enough, never over the
+   home menu; main.js asks www/ads.js for the space to leave free). */
+#ad-ring { position: fixed; inset: 0; z-index: 4; display: none; pointer-events: none; }
+body.ad-gutters:not(.home) #ad-ring { display: block; }
+#ad-ring .ad-tile { position: absolute; pointer-events: auto; background: rgba(6, 26, 68, 0.45); }
+/* Fullscreen = immersive: hide the ads (the race ring is turned off in www/ads.js too, so the canvas
+   reclaims the space). */
+:fullscreen #home .ad-row, :-webkit-full-screen #home .ad-row,
+:fullscreen #ad-ring, :-webkit-full-screen #ad-ring { display: none; }
